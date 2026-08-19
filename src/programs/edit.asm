@@ -61,6 +61,11 @@ start:
   je editor_exit
   cmp eax, 2
   je .event_loop                 ;// оставить FASM diagnostics до следующей клавиши
+  cmp eax, 3
+  je .full_render
+  call editor_render_fast
+  jmp .event_loop
+.full_render:
   call editor_render
   jmp .event_loop
 
@@ -156,39 +161,39 @@ editor_handle_key:
   cmp qword [cursor_offset], 0
   je .continue
   dec qword [cursor_offset]
-  jmp .continue
+  jmp .full_render
 .right:
   mov rax, [cursor_offset]
   cmp rax, [document_length]
   jae .continue
   inc qword [cursor_offset]
-  jmp .continue
+  jmp .full_render
 .up:
   call editor_move_up
-  jmp .continue
+  jmp .full_render
 .down:
   call editor_move_down
-  jmp .continue
+  jmp .full_render
 .home:
   mov rdi, [cursor_offset]
   call editor_line_start
   mov [cursor_offset], rax
-  jmp .continue
+  jmp .full_render
 .end:
   mov rdi, [cursor_offset]
   call editor_line_end
   mov [cursor_offset], rax
-  jmp .continue
+  jmp .full_render
 .delete:
   call editor_delete
-  jmp .continue
+  jmp .full_render
 .backspace:
   call editor_backspace
-  jmp .continue
+  jmp .full_render
 .newline:
   mov dil, 10
   call editor_insert_byte
-  jmp .continue
+  jmp .full_render
 .tab:
   mov dil, ' '
   call editor_insert_byte
@@ -202,7 +207,7 @@ editor_handle_key:
   call editor_move_up
   pop rcx
   loop .page_up_loop
-  jmp .continue
+  jmp .full_render
 .page_down:
   mov ecx, TEXT_ROWS
 .page_down_loop:
@@ -210,7 +215,7 @@ editor_handle_key:
   call editor_move_down
   pop rcx
   loop .page_down_loop
-  jmp .continue
+  jmp .full_render
 .help:
   mov qword [status_message], help_status_text
   jmp .continue
@@ -219,19 +224,22 @@ editor_handle_key:
   jmp .continue
 .template:
   call editor_insert_template
-  jmp .continue
+  jmp .full_render
 .build:
   call editor_build
   test rax, rax
   jnz .preserve_diagnostics
-  jmp .continue
+  jmp .full_render
 .run:
   call editor_run
   test rax, rax
   jnz .preserve_diagnostics
-  jmp .continue
+  jmp .full_render
 .preserve_diagnostics:
   mov eax, 2
+  ret
+.full_render:
+  mov eax, 3
   ret
 .continue:
 .ignored:
@@ -621,6 +629,37 @@ editor_render:
   call editor_render_status
   call editor_render_help
   xor eax, eax
+  ret
+
+;// Обычный printable-ввод меняет только текущую строку, title/status и cursor.
+;// Это 12 коротких DRAW вместо примерно 100 IPC-сообщений полного экрана.
+;// Если viewport сдвинулся, безопасно возвращаемся к полной перерисовке.
+editor_render_fast:
+  mov rax, [view_offset]
+  mov [previous_view_offset], rax
+  mov rax, [horizontal_offset]
+  mov [previous_horizontal_offset], rax
+  call editor_update_view
+  mov rax, [view_offset]
+  cmp rax, [previous_view_offset]
+  jne .full
+  mov rax, [horizontal_offset]
+  cmp rax, [previous_horizontal_offset]
+  jne .full
+
+  call editor_render_title
+  mov edi, dword [cursor_screen_row]
+  add edi, TEXT_FIRST_ROW
+  mov rsi, [cursor_line_start]
+  mov rdx, [view_line_number]
+  add rdx, [cursor_screen_row]
+  call editor_render_source_row
+  call editor_render_cursor
+  call editor_render_status
+  xor eax, eax
+  ret
+.full:
+  call editor_render
   ret
 
 ;// Поддержать cursor внутри вертикального и горизонтального viewport.
@@ -1143,6 +1182,8 @@ cursor_screen_row dq 0
 view_offset dq 0
 view_line_number dq 1
 horizontal_offset dq 0
+previous_view_offset dq 0
+previous_horizontal_offset dq 0
 status_message dq opened_text
 document_dirty db 0
 debug_mode db 0

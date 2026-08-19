@@ -55,7 +55,13 @@ start:
   test r14b, 0x80                 ;// release остальных клавиш
   jnz .wait
 
+  ;// Один marker подтверждает реальный IRQ в тестах. Логировать каждую
+  ;// клавишу дорого и превращает debugcon в скрытый тормоз autorepeat.
+  cmp byte [handled_once], 0
+  jne .event_ready
+  mov byte [handled_once], 1
   log handled_text, handled_text.size
+.event_ready:
   test r13b, r13b
   jnz .extended_key
   cmp bl, 0x3B
@@ -150,10 +156,19 @@ start:
   mov qword [message+IpcMessage.words], TERM_KEY
   mov qword [message+IpcMessage.words+8], rax
   mov qword [message+IpcMessage.cap_count], 0
+.send_key:
   mov eax, SYS_IPC_SEND
   mov rdi, r12
   lea rsi, [message]
   syscall
+  cmp rax, -11                    ;// очередь terminal временно заполнена
+  jne .key_sent
+  ;// Перерисовка редактора создаёт короткие пачки DRAW. Это нормальный
+  ;// backpressure, а не отказ устройства: уступаем CPU и повторяем событие,
+  ;// чтобы keyboard driver не завершился и не потерял нажатую клавишу.
+  system_call SYS_YIELD
+  jmp .send_key
+.key_sent:
   test rax, rax
   jnz .failed
   jmp .wait
@@ -245,6 +260,7 @@ align 8
 modifiers dq 0
 extended_prefix db 0
 caps_lock db 0
+handled_once db 0
 align 8
 message rb IpcMessage.bytes
 reply rb IpcMessage.bytes

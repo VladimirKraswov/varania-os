@@ -17,13 +17,16 @@ DISK_ELFS = {
     "hello.elf": ROOT / "build" / "disk" / "hello.elf",
     "edit.elf": ROOT / "build" / "disk" / "edit.elf",
     "sysinfo.elf": ROOT / "build" / "disk" / "sysinfo.elf",
+    "hang.elf": ROOT / "build" / "disk" / "hang.elf",
     "fasm.elf": ROOT / "build" / "disk" / "fasm.elf",
 }
 SYSTEM_LIBRARY_FILES = (
     ROOT / "build/sysroot/root/system/lib/runtime.inc",
+    ROOT / "build/sysroot/root/system/lib/session.inc",
     ROOT / "build/sysroot/root/system/lib/services/terminal.vlib",
     ROOT / "build/sysroot/root/system/lib/services/filesystem.vlib",
     ROOT / "build/sysroot/root/system/lib/services/process.vlib",
+    ROOT / "build/sysroot/root/system/lib/services/session.vlib",
     ROOT / "build/sysroot/root/system/templates/minimal.asm",
 )
 FASM_SHA256 = "a34dec7d0bc2dc79faabb68bd8bc2f62b6cfb31d69c01449367ce4cd8098934e"
@@ -41,6 +44,7 @@ EXPECTED_PROGRAMS = {
     "nameserver.elf",
     "service.elf",
     "client.elf",
+    "sessiond.elf",
     "terminal.elf",
     "keyboard.elf",
     "nvme.elf",

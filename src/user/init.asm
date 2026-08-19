@@ -169,6 +169,11 @@ start:
   ;// передаст экран shell; диагностический SYS_LOG продолжит идти в debugcon.
   ;// Init выдаёт каждому сервису только SEND-capability nameserver. MMIO,
   ;// IRQ1 и PS/2 I/O добавляет точечная bootstrap policy процесса procd.
+  lea rdi, [sessiond_name]
+  mov esi, sessiond_name.size
+  call spawn_interactive
+  test rax, rax
+  jnz init_failed
   lea rdi, [terminal_name]
   mov esi, terminal_name.size
   call spawn_interactive
@@ -425,6 +430,8 @@ vafs_name db "vafs.elf"
 .size = $-vafs_name
 shell_name db "shell.elf"
 .size = $-shell_name
+sessiond_name db "sessiond.elf"
+.size = $-sessiond_name
 lifecycle_name db "lifecycle_child.elf"
 .size = $-lifecycle_name
 revoke_name db "cap_revoke_test.elf"

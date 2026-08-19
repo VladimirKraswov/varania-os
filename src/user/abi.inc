@@ -93,6 +93,7 @@ SERVICE_RAMFS    = 3
 SERVICE_FILESYSTEM = 3           ;// совместимый ID постоянного VFS-сервиса
 SERVICE_BLOCK    = 4
 SERVICE_PROCESS  = 5
+SERVICE_SESSION  = 6
 
 BLOCK_ATTACH = 1
 BLOCK_READ   = 2
@@ -105,6 +106,14 @@ TERM_READLINE = 3
 TERM_CLEAR    = 4
 TERM_READKEY  = 5
 TERM_DRAW     = 6
+
+;// session.vlib: независимый от foreground-программы путь управления.
+;// Shell передаёт CONTROL capability запущенного процесса sessiond, а
+;// terminal превращает Ctrl+C в INTERRUPT даже если shell заблокирован в WAIT.
+SESSION_SET_FOREGROUND   = 1
+SESSION_CLEAR_FOREGROUND = 2
+SESSION_INTERRUPT        = 3
+SESSION_INTERRUPTED_STATUS = 130
 
 ;// Значение TERM_KEY/TERM_READKEY: младшие 32 бита — Unicode/служебный key,
 ;// старшие биты — независимые модификаторы. Пока раскладка ASCII, но формат

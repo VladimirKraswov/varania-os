@@ -18,6 +18,7 @@ Varania OS показывает устройство 64-битной capability-
 - capability attenuation, move, дерево происхождения и recursive revoke;
 - IPC-очередь на восемь сообщений: 8 qword и до 2 capabilities в сообщении;
 - динамические ELF64-процессы, `exit/wait`, внешний kill и supervisor restart;
+- независимый `sessiond`: Ctrl+C завершает foreground даже когда shell в WAIT;
 - освобождение page tables, физических frames, shared mappings и capabilities;
 - PCI configuration через ограниченную I/O capability;
 - изолированный NVMe-драйвер в ring 3: BAR, admin/I/O queues, DMA, Identify,
@@ -28,7 +29,7 @@ Varania OS показывает устройство 64-битной capability-
 - offset/append streaming write с COW-публикацией и CRC32C по страницам;
 - загрузка ELF64 прямо из VaraniaFS через shared capability и `procd`;
 - официальный FASM 1.73.35 с Varania platform layer: VFS, terminal, heap, exit;
-- `libvarania`: строки/IPC/VFS/terminal/process и versioned `.vlib` services;
+- `libvarania`: строки/IPC/VFS/terminal/session/process и versioned `.vlib` services;
 - полноэкранный VEdit: создание/правка, FASM-подсветка, debug, build/run/template;
 - shell: `ls`, `cd`, `mkdir`, `touch`, `cat`, `write`, `append`, `edit`, `run`,
   `pwd`, `clear`, `help`;
@@ -115,6 +116,8 @@ varania:/$ edit /system/build/hello.asm
 
 В VEdit: `F7` — шаблон, `Ctrl+S` — сохранить, `F5` — собрать, `F6` —
 запустить, `F2` — diagnostic debug mode, `Ctrl+Q` — выйти.
+Если программа или сам редактор перестали отвечать, `Ctrl+C` обрабатывает не
+foreground-процесс, а terminal + `sessiond`; shell вернётся со status 130.
 
 В формате намеренно нет UID/GID/mode/ACL и аналога `sudo`. Доступ задаётся
 endpoint capability процесса, а не POSIX-моделью прав.
@@ -141,11 +144,11 @@ python3 tools/vafs/vafs.py fsck VARANIA.VAFS --data
 
 | Команда | Что проверяет или запускает |
 |---|---|
-| `make build` | kernel, 19 bootstrap ELF, disk ELF/FASM и оба sparse-диска |
+| `make build` | kernel, 20 bootstrap ELF, disk ELF/FASM и оба sparse-диска |
 | `make check` | boot layout, ELF W^X, FASM hash и VaraniaFS fsck |
 | `make smoke` | boot, процессы, IPC, IRQ1 и NVMe DMA read/write/flush |
 | `make test-shell` | keyboard → terminal → VFS → NVMe и remount/fsck |
-| `make test-editor` | VEdit → libvarania → FASM build/run и цветной VGA |
+| `make test-editor` | burst input, VEdit/FASM, Ctrl+C supervisor и цветной VGA |
 | `make test-vafs` | COW, CRC32C, B+tree, torn-super recovery и raw offset |
 | `make test` | все structural и QEMU-тесты |
 | `make run` | интерактивная VM |
@@ -164,6 +167,7 @@ src/user/nvme.asm               PCIe/NVMe ring-3 block driver
 src/user/vafs.asm               persistent COW filesystem server
 src/user/terminal.asm           VGA terminal и line discipline
 src/user/keyboard.asm           PS/2 compatibility input driver
+src/user/sessiond.asm           стек foreground CONTROL и независимый Ctrl+C
 src/user/shell.asm              файловая командная оболочка
 src/lib/                        системная библиотека и клиенты .vlib ABI
 src/fasm/                       platform layer официального FASM 1.73.35

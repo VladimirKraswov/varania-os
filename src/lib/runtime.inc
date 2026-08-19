@@ -1,5 +1,5 @@
 ;//////////////////////////////////////////////////////////////////////////////
-;// libvarania umbrella: base + IPC + terminal + VFS + process
+;// libvarania umbrella: base + IPC + terminal + VFS + session + process
 ;//////////////////////////////////////////////////////////////////////////////
 ;
 ;// До include этого файла программа должна include user/abi.inc. Публичные
@@ -10,6 +10,7 @@ include "base.inc"
 include "ipc.inc"
 include "terminal.inc"
 include "vfs.inc"
+include "session.inc"
 include "process.inc"
 
 segment readable executable
@@ -20,6 +21,9 @@ vlib_initialize:
   test rax, rax
   jnz .done
   call vlib_fs_connect
+  test rax, rax
+  jnz .done
+  call vlib_session_connect
   test rax, rax
   jnz .done
   call vlib_process_connect
@@ -35,6 +39,7 @@ align 8
 vlib_terminal_endpoint dq 0
 vlib_fs_endpoint dq 0
 vlib_process_endpoint dq 0
+vlib_session_endpoint dq 0
 vlib_fs_buffer_cap dq 0
 vlib_path_component rb 48
 vlib_path_work rb VLIB_PATH_MAX+1

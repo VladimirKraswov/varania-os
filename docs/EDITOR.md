@@ -52,6 +52,17 @@ terminal до 24 cells за IPC. Terminal проверяет координат�
 единственным владельцем VGA MMIO. При переходе к GOP этот API будет заменён
 surface/font service без выдачи framebuffer capability приложению.
 
+При обычном наборе VEdit перерисовывает только текущую строку, title, status и
+cursor — 12 коротких сообщений вместо примерно 100 для полного экрана.
+Keyboard повторяет `TERM_KEY` при `-11`, а terminal хранит 64 события между
+`READKEY`, поэтому быстрый autorepeat не завершает драйвер и не теряется.
+
+`Ctrl+C` намеренно не обрабатывается кодом VEdit. Terminal передаёт interrupt
+в `sessiond`, который владеет только `CAP_CONTROL` foreground-процесса. Даже
+если редактор зациклился или заблокирован, микроядро завершит его status 130,
+разбудит shell и освободит address space. Вложенные программы образуют стек:
+пока VEdit ждёт запущенный FASM/ELF, прерывается верхняя задача.
+
 `F2` сейчас является режимом диагностики редактора и build pipeline, не
 отладчиком чужого процесса с breakpoints. Полноценному debugger нужны отдельные
 debug capability, register snapshot и stop/resume protocol; давать редактору
@@ -63,9 +74,10 @@ debug capability, register snapshot и stop/resume protocol; давать ред
 
 1. `edit /system/build/editortest.asm`;
 2. F7 и проверку цветных VGA attributes;
-3. F2 и проверку debug status;
-4. Ctrl+S, F5, F6 и выполнение нового ELF;
-5. Ctrl+Q, остановку VM, `fsck --data` и извлечение source/output.
+3. burst из 12 одинаковых клавиш внутри строки без потерь/искажения;
+4. F2, Ctrl+S, F5, F6 и выполнение нового ELF;
+5. запуск бесконечного `/bin/hang.elf`, Ctrl+C и возврат к рабочему `ls`;
+6. остановку VM, `fsck --data` и извлечение source/output.
 
 Контрольный ELF печатает `VARANIA:EDITOR_TEMPLATE_OK`. Таким образом тест
 покрывает raw keyboard → terminal → VEdit → libvarania → VFS/NVMe → FASM →

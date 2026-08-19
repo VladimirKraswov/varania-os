@@ -108,13 +108,30 @@ vlib_process_run:
   mov r12, qword [vlib_reply+IpcMessage.caps+IpcCap.handle]
   mov r13, qword [vlib_reply+IpcMessage.caps+IpcCap.bytes+IpcCap.handle]
   mov rdi, r12
+  call vlib_session_push_foreground
+  test rax, rax
+  jnz .untracked
+  mov rdi, r12
   system_call SYS_WAIT
   mov [rsp], rax
+  call vlib_session_pop_foreground
   mov rdi, r12
   call vlib_close
   mov rdi, r13
   call vlib_close
   mov rax, [rsp]
+  jmp .done
+.untracked:
+  ;// Не блокируемся на процессе без независимого control path.
+  mov eax, SYS_PROCESS_KILL
+  mov rdi, r12
+  mov esi, SESSION_INTERRUPTED_STATUS
+  syscall
+  mov rdi, r12
+  system_call SYS_WAIT
+  mov rdi, r13
+  call vlib_close
+  mov rax, VLIB_ERR_IO
   jmp .done
 .invalid:
   mov rax, VLIB_ERR_INVALID

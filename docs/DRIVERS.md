@@ -35,6 +35,11 @@ Endpoint terminal он
 получает через nameserver и отправляет `TERM_KEY`. Таким образом keyboard не
 может рисовать на экране, а terminal не может читать PS/2 ports.
 
+Полная endpoint queue означает backpressure `-11`, а не аварию устройства.
+Keyboard уступает CPU и повторяет тот же `TERM_KEY`; это важно во время пачки
+`DRAW` от редактора. Раньше этот статус завершал driver, из-за чего живое ядро
+оставалось без ввода и внешне выглядело полностью зависшим.
+
 Текущая US-таблица включает оба регистра, знаки, стрелки, Home/End,
 PageUp/PageDown, Delete/Insert и F1..F10. Событие хранит key в младших 32 битах,
 а модификаторы — в старших. Compose, Unicode и несколько layouts должны
@@ -58,6 +63,8 @@ address. Mapping помечен `PAGE.BORROWED`: при завершении ter
 Terminal реализует 80×25 cells, scrolling, cursor в памяти, очистку, echo,
 backspace, `READLINE`, raw `READKEY` и проверенный абсолютный `DRAW` до 24
 цветных cells за IPC. VEdit использует raw/draw, но VGA capability не получает.
+Между запросами terminal сохраняет до 64 key events в кольцевой очереди; при
+переполнении удаляет самый старый autorepeat, сохраняя свежий Ctrl+C/F10.
 Hardware VGA cursor ports пока не нужны. После
 старта `SYS_LOG` остаётся только debugcon-интерфейсом: kernel diagnostics не
 портят пользовательский экран.
@@ -68,6 +75,8 @@ flowchart LR
     K -->|"key + modifiers / TERM_KEY"| T["terminal.elf"]
     S["shell.elf"] -->|"WRITE / READLINE / CLEAR"| T
     E["edit.elf"] -->|"READKEY / DRAW"| T
+    T -->|"Ctrl+C"| SD["sessiond"]
+    SD -->|"PROCESS_KILL foreground"| KERNEL["microkernel"]
     T -->|"MMIO mapping"| V["VGA text page"]
 ```
 

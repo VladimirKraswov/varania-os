@@ -19,9 +19,8 @@ ELF, создаёт space/frames/mappings/thread. `init` решает, каки�
 ```mermaid
 flowchart TB
     I["user/init — system policy"] -->|"spawn RPC"| P["user/procd — ELF loader"]
-    I --> V["user/supervisor — kill/restart"]
-    V -->|"spawn RPC"| P
-    V -->|"PROCESS_KILL / WAIT"| K
+    I --> V["user/sessiond — foreground supervisor"]
+    V -->|"PROCESS_KILL status 130"| K
     C["client"] -->|"lookup RPC"| N["user/nameserver"]
     N -->|"endpoint capability"| C
     C -->|"queued message"| S["service"]
@@ -29,6 +28,7 @@ flowchart TB
     I -->|"wait"| K
     D["keyboard driver"] -->|"IRQ1 + I/O caps"| K
     D -->|"ASCII"| T["VGA terminal"]
+    T -->|"Ctrl+C"| V
     T -->|"MMIO cap"| K
     H["shell"] -->|"terminal IPC"| T
     H -->|"filesystem IPC"| F["VaraniaFS server"]
@@ -184,6 +184,9 @@ IPC transfer — descendant. Пока capability лежит в endpoint queue, �
 Endpoint независим от TCB. Это позволяет передать сервисный канал без process
 capability. Queue содержит восемь сообщений; каждое — восемь qword и две
 capabilities. Пустой receive блокирует thread, полный send возвращает `-11`.
+Драйверы и `libvarania` трактуют `-11` как backpressure: выполняют `YIELD` и
+повторяют send. Terminal дополнительно держит ring на 64 key events, пока raw
+клиент перерисовывает экран и ещё не выставил следующий `READKEY`.
 
 Один waiting receiver удерживает endpoint ссылкой, поэтому закрытие последнего
 user handle не оставляет висячий `Task.wait_endpoint`. Передача с `CAP_MOVE`
@@ -219,6 +222,13 @@ capabilities, AddressSpace ref, page tables, frames и kernel-stack frame.
 тот же deferred teardown, что для `EXIT` и user fault. Пример
 `user/supervisor` показывает policy отдельно от механизма: завершает
 заблокированную цель, ждёт status и дважды создаёт новый worker после отказа.
+
+Рабочая интерактивная policy находится в `sessiond`. Shell перед каждым WAIT
+делегирует ему только CONTROL capability foreground child. `libvarania` делает
+то же для вложенного запуска, поэтому sessiond хранит стек до восьми уровней.
+Ctrl+C приходит через terminal, верхняя задача завершается status 130, а её
+ожидающий родитель просыпается обычным механизмом WAIT. Ни shell, ни зависшее
+приложение не обязаны исполнять обработчик сигнала.
 
 ## Scheduler и faults
 

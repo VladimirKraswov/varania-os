@@ -1,0 +1,6 @@
+VLIB01
+name=session
+service=6
+abi=1
+transport=ipc-capability
+interface=/system/lib/session.inc

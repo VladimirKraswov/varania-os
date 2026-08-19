@@ -159,7 +159,8 @@ NVMe — BAR/DMA, VFS — nameserver/`CREATE`, а `shm_sender` — `CREATE`.
 ## Init, nameserver и сервисы
 
 Init сначала запускает nameserver и изолированные integration-процессы. После
-успеха self-tests он создаёт terminal, NVMe, VaraniaFS, keyboard driver и shell. Каждому
+успеха self-tests он создаёт sessiond, terminal, NVMe, VaraniaFS, keyboard
+driver и shell. Каждому
 из них init передаёт только `CAP_SEND` к endpoint nameserver; hardware grants
 добавляет policy procd.
 
@@ -217,5 +218,6 @@ message db "hello from ring 3", 10
 - `terminal/vafs/nvme/shell`: key events, persistent FS lifecycle и VGA page;
 - `cap_revoke_test.elf`: цепочка из двух descendants и сохранение root;
 - `supervisor.elf`: kill blocked target и два restart завершившегося worker;
+- `sessiond.elf`: стек foreground CONTROL; terminal Ctrl+C будит shell через kill;
 - `shm_sender/receiver.elf`: две общие страницы, capability transfer,
   двусторонняя запись и повторный teardown с проверкой числа frames.

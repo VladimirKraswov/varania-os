@@ -16,13 +16,13 @@ VAFS_BOOT_UUID := 56415241-4e49-4146-5300-000000000000
 VAFS_UUID    := 56415241-4e49-4146-5300-000000000001
 
 USER_BUILD := build/user
-USER_PROGRAMS := procd init nameserver service client terminal keyboard nvme vafs shell \
+USER_PROGRAMS := procd init nameserver service client sessiond terminal keyboard nvme vafs shell \
 		 memory_test isolation_test \
 		 lifecycle_child cap_revoke_test supervisor kill_target restart_worker \
 		 shm_receiver shm_sender
 USER_ELFS := $(addprefix $(USER_BUILD)/,$(addsuffix .elf,$(USER_PROGRAMS)))
 DISK_BUILD := build/disk
-DISK_PROGRAMS := hello edit sysinfo
+DISK_PROGRAMS := hello edit sysinfo hang
 DISK_ELFS := $(addprefix $(DISK_BUILD)/,$(addsuffix .elf,$(DISK_PROGRAMS)))
 FASM_SOURCE_STAMP := build/fasm-source/.stamp
 FASM_GUEST_ELF := $(DISK_BUILD)/fasm.elf

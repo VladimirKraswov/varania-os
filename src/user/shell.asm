@@ -35,6 +35,12 @@ start:
   js fatal
   mov [process_endpoint], rax
 
+  mov edi, SERVICE_SESSION
+  call lookup_service
+  test rax, rax
+  js fatal
+  mov [session_endpoint], rax
+
   log ready_text, ready_text.size
   lea rdi, [shell_ready]
   call print_z
@@ -653,17 +659,41 @@ command_run:
   mov r12, qword [ipc_reply+IpcMessage.caps+IpcCap.handle]
   mov r13, qword [ipc_reply+IpcMessage.caps+IpcCap.bytes+IpcCap.handle]
   mov rdi, r12
+  call session_set_foreground
+  test rax, rax
+  jnz .terminate_untracked
+  mov rdi, r12
   system_call SYS_WAIT
   mov rbx, rax
+  call session_clear_foreground
   mov rdi, r12
   call close_handle
   mov rdi, r13
   call close_handle
+  cmp rbx, SESSION_INTERRUPTED_STATUS
+  je .interrupted
   test rbx, rbx
   jnz .error
   lea rdi, [run_ok]
   call print_z
   log run_ok_text, run_ok_text.size
+  jmp .done
+.terminate_untracked:
+  ;// Не оставляем процесс, который нельзя независимо прервать.
+  mov eax, SYS_PROCESS_KILL
+  mov rdi, r12
+  mov esi, SESSION_INTERRUPTED_STATUS
+  syscall
+  mov rdi, r12
+  system_call SYS_WAIT
+  mov rdi, r13
+  call close_handle
+  jmp .error
+.interrupted:
+  call terminal_clear
+  lea rdi, [interrupted_user_text]
+  call print_z
+  log interrupted_marker, interrupted_marker.size
   jmp .done
 .too_large:
   lea rdi, [elf_large_text]
@@ -678,6 +708,36 @@ command_run:
   pop r13
   pop r12
   pop rbx
+  ret
+
+;// Делегировать sessiond только право завершения текущего foreground child.
+;// WAIT capability остаётся у shell, поэтому обычный lifecycle не меняется.
+session_set_foreground:
+  push r12
+  mov r12, rdi
+  lea rdi, [ipc_message]
+  mov ecx, IpcMessage.bytes
+  xor eax, eax
+  rep stosb
+  mov qword [ipc_message+IpcMessage.words], SESSION_SET_FOREGROUND
+  mov qword [ipc_message+IpcMessage.cap_count], 1
+  mov qword [ipc_message+IpcMessage.caps+IpcCap.handle], r12
+  mov qword [ipc_message+IpcMessage.caps+IpcCap.rights], CAP_CONTROL
+  mov rdi, [session_endpoint]
+  lea rsi, [ipc_message]
+  call send_retry
+  pop r12
+  ret
+
+session_clear_foreground:
+  lea rdi, [ipc_message]
+  mov ecx, IpcMessage.bytes
+  xor eax, eax
+  rep stosb
+  mov qword [ipc_message+IpcMessage.words], SESSION_CLEAR_FOREGROUND
+  mov rdi, [session_endpoint]
+  lea rsi, [ipc_message]
+  call send_retry
   ret
 
 ;// RSI=путь. Системный editor всегда ищется в /bin, а относительный путь
@@ -1024,6 +1084,8 @@ write_ok_text db "VARANIA:SHELL_WRITE_OK", 10
 .size = $-write_ok_text
 run_ok_text db "VARANIA:SHELL_RUN_OK", 10
 .size = $-run_ok_text
+interrupted_marker db "VARANIA:SHELL_INTERRUPT_OK", 10
+.size = $-interrupted_marker
 failed_text db "shell: fatal service or IPC error", 10
 .size = $-failed_text
 
@@ -1040,6 +1102,7 @@ touch_ok db "File created.", 10, 0
 write_ok db "File written atomically.", 10, 0
 run_ok db "Program exited successfully.", 10, 0
 run_error_text db "run: cannot load ELF64 program.", 10, 0
+interrupted_user_text db "Foreground program interrupted (status 130).", 10, 0
 elf_large_text db "run: ELF is larger than the 256 KiB loader window.", 10, 0
 slash db "/", 0
 newline db 10, 0
@@ -1064,6 +1127,7 @@ align 8
 terminal_endpoint dq 0
 filesystem_endpoint dq 0
 process_endpoint dq 0
+session_endpoint dq 0
 filesystem_buffer_cap dq 0
 filesystem_buffer_size dq 0
 current_node dq 0

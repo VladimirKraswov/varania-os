@@ -12,6 +12,7 @@ VGA_WIDTH     = 80
 VGA_HEIGHT    = 25
 VGA_ATTRIBUTE = 0x07
 LINE_MAX      = 47               ;// весь payload IPC words[2..7]
+KEY_QUEUE_SIZE = 64              ;// степень двойки для дешёвого кольцевого буфера
 
 segment readable executable
 start:
@@ -21,6 +22,12 @@ start:
   syscall
   test rax, rax
   jnz .failed
+  ;// Ctrl+C должен работать даже когда shell ждёт чужой процесс. Sessiond
+  ;// запускается раньше terminal и владеет только CONTROL foreground-задачи.
+  call lookup_session
+  test rax, rax
+  js .failed
+  mov [session_endpoint], rax
   call console_clear
   lea rdi, [welcome_text]
   mov esi, welcome_text.size
@@ -87,6 +94,7 @@ start:
   mov [pending_reply], rax
   mov qword [pending_mode], 1
   mov qword [line_length], 0
+  call drain_queued_keys
   jmp .serve
 
 .bad_readline:
@@ -108,6 +116,7 @@ start:
   mov rax, qword [message+IpcMessage.caps+IpcCap.handle]
   mov [pending_reply], rax
   mov qword [pending_mode], 2
+  call drain_queued_keys
   jmp .serve
 
 ;// Абсолютный вывод уже подготовленных VGA cells. В words[1] упакованы
@@ -149,8 +158,34 @@ start:
 ;// использует младший ASCII-байт и тем самым остаётся совместимым с shell.
 dispatch_key:
   push rbx
+  mov rbx, rdi
+  mov eax, ebx
+  or al, 32
+  cmp al, 'c'
+  jne .route
+  mov rax, rbx
+  shr rax, 32
+  test al, 2                     ;// KEY_MOD_CTRL >> 32
+  jz .route
+  cmp qword [pending_mode], 1
+  jne .interrupt_foreground
   cmp qword [pending_reply], 0
-  je .done
+  je .interrupt_foreground
+  ;// В prompt Ctrl+C отменяет текущую строку, а не foreground process.
+  call cancel_readline
+  jmp .done
+.interrupt_foreground:
+  call notify_interrupt
+  jmp .done
+.route:
+  mov rdi, rbx
+  cmp qword [pending_reply], 0
+  jne .have_waiter
+  ;// Клиент может рисовать или обрабатывать предыдущую клавишу и ещё не
+  ;// успеть выставить READKEY. Сохраняем событие, а не теряем его.
+  call key_queue_push
+  jmp .done
+.have_waiter:
   cmp qword [pending_mode], 2
   je .raw
   mov bl, dil
@@ -229,6 +264,124 @@ dispatch_key:
   rep stosb
 .done:
   pop rbx
+  ret
+
+;// Отменить ввод shell и вернуть пустую строку, чтобы он показал новый prompt.
+cancel_readline:
+  lea rdi, [interrupt_echo]
+  mov esi, interrupt_echo.size
+  call console_write
+  lea rdi, [reply]
+  mov ecx, IpcMessage.bytes
+  xor eax, eax
+  rep stosb
+  mov eax, SYS_IPC_SEND
+  mov rdi, [pending_reply]
+  lea rsi, [reply]
+  syscall
+  mov rdi, [pending_reply]
+  call close_handle
+  mov qword [pending_reply], 0
+  mov qword [pending_mode], 0
+  mov qword [line_length], 0
+  lea rdi, [line_buffer]
+  mov ecx, LINE_MAX+1
+  xor eax, eax
+  rep stosb
+  ret
+
+;// Fire-and-forget достаточно: sessiond уже хранит CONTROL capability, а
+;// shell будет разбужен самим SYS_PROCESS_KILL через обычный WAIT status.
+notify_interrupt:
+  lea rdi, [control_message]
+  mov ecx, IpcMessage.bytes
+  xor eax, eax
+  rep stosb
+  mov qword [control_message+IpcMessage.words], SESSION_INTERRUPT
+.retry:
+  mov eax, SYS_IPC_SEND
+  mov rdi, [session_endpoint]
+  lea rsi, [control_message]
+  syscall
+  cmp rax, -11
+  jne .done
+  system_call SYS_YIELD
+  jmp .retry
+.done:
+  ret
+
+;// Найти sessiond до публикации terminal. В этот момент другие клиенты ещё не
+;// используют SELF_EP, поэтому синхронный bootstrap lookup однозначен.
+lookup_session:
+.retry:
+  lea rdi, [control_message]
+  mov ecx, IpcMessage.bytes*2
+  xor eax, eax
+  rep stosb
+  mov qword [control_message+IpcMessage.words], NAMESERVER_LOOKUP
+  mov qword [control_message+IpcMessage.words+8], SERVICE_SESSION
+  mov qword [control_message+IpcMessage.words+16], 1
+  mov qword [control_message+IpcMessage.cap_count], 1
+  mov qword [control_message+IpcMessage.caps+IpcCap.handle], SELF_EP
+  mov qword [control_message+IpcMessage.caps+IpcCap.rights], CAP_SEND
+  ipc_send NAMESERVER_EP, control_message
+  test rax, rax
+  jnz .done
+  ipc_receive SELF_EP, control_reply
+  test rax, rax
+  jnz .done
+  cmp qword [control_reply+IpcMessage.words], 0
+  je .found
+  system_call SYS_YIELD
+  jmp .retry
+.found:
+  cmp qword [control_reply+IpcMessage.cap_count], 1
+  jne .invalid
+  mov rax, qword [control_reply+IpcMessage.caps+IpcCap.handle]
+  ret
+.invalid:
+  mov rax, -22
+.done:
+  ret
+
+;// RDI=key event. При переполнении отбрасывается самое старое событие:
+;// свежий Ctrl+Q/F10 важнее давно накопленного autorepeat.
+key_queue_push:
+  mov rax, [key_queue_count]
+  cmp rax, KEY_QUEUE_SIZE
+  jb .space
+  mov rax, [key_queue_head]
+  inc rax
+  and eax, KEY_QUEUE_SIZE-1
+  mov [key_queue_head], rax
+  dec qword [key_queue_count]
+.space:
+  mov rax, [key_queue_tail]
+  mov [key_queue+rax*8], rdi
+  inc rax
+  and eax, KEY_QUEUE_SIZE-1
+  mov [key_queue_tail], rax
+  inc qword [key_queue_count]
+  ret
+
+;// После регистрации READKEY/READLINE доставить накопленные события. Raw
+;// waiter закрывается после одного key; line discipline может принять пачку
+;// вплоть до Enter. Остаток остаётся для следующего запроса.
+drain_queued_keys:
+.next:
+  cmp qword [pending_reply], 0
+  je .done
+  cmp qword [key_queue_count], 0
+  je .done
+  mov rax, [key_queue_head]
+  mov rdi, [key_queue+rax*8]
+  inc rax
+  and eax, KEY_QUEUE_SIZE-1
+  mov [key_queue_head], rax
+  dec qword [key_queue_count]
+  call dispatch_key
+  jmp .next
+.done:
   ret
 
 ;// RDI=buffer, RSI=len.
@@ -348,13 +501,22 @@ ready_text db "terminal: user-space VGA console ready", 10
 .size = $-ready_text
 failed_text db "terminal: fatal mapping or IPC error", 10
 .size = $-failed_text
+interrupt_echo db "^C", 10
+.size = $-interrupt_echo
 align 8
 cursor_x dq 0
 cursor_y dq 0
+session_endpoint dq 0
 pending_reply dq 0
 pending_mode dq 0               ;// 1=READLINE, 2=READKEY
 line_length dq 0
+key_queue_head dq 0
+key_queue_tail dq 0
+key_queue_count dq 0
+key_queue rq KEY_QUEUE_SIZE
 ;// LINE_MAX и storage обязаны меняться вместе: payload IPC даёт 47 байт плюс NUL.
 line_buffer rb LINE_MAX+1
 message rb IpcMessage.bytes
 reply rb IpcMessage.bytes
+control_message rb IpcMessage.bytes
+control_reply rb IpcMessage.bytes

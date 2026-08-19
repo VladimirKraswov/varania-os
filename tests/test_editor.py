@@ -29,11 +29,22 @@ TEMPLATE_OK = b"VARANIA:EDITOR_TEMPLATE_OK"
 CD_OK = b"VARANIA:SHELL_CD_OK"
 RUN_OK = b"VARANIA:SHELL_RUN_OK"
 SYSINFO_OK = b"VARANIA:SYSINFO_OK"
+HANG_READY = b"VARANIA:HANG_READY"
+FOREGROUND_INTERRUPTED = b"VARANIA:FOREGROUND_INTERRUPTED"
+SHELL_INTERRUPT_OK = b"VARANIA:SHELL_INTERRUPT_OK"
+LS_OK = b"VARANIA:SHELL_LS_OK"
 
 
 def press(qmp: QmpClient, key: str) -> None:
     qmp.hmp(f"sendkey {key} 40")
     time.sleep(0.08)
+
+
+def press_burst(qmp: QmpClient, key: str, count: int) -> None:
+    """Быстрый autorepeat: нагрузить terminal одновременно с DRAW."""
+    for _ in range(count):
+        qmp.hmp(f"sendkey {key} 5")
+        time.sleep(0.012)
 
 
 def read_vga_attributes(qmp: QmpClient, directory: Path) -> set[int]:
@@ -113,18 +124,23 @@ def main() -> None:
         # вставляла разные байты при вводе внутри (не в конце) документа.
         press(client, "up")       # последняя строка шаблона: .size = ...
         press(client, "home")
-        press(client, "a")
-        press(client, "a")
-        press(client, "a")
-        repeated_key_screen = read_vga(client, temporary)
-        if "aaa.size" not in repeated_key_screen:
+        repeat_count = 12
+        press_burst(client, "a", repeat_count)
+        repeated_key_screen = ""
+        repeat_deadline = time.monotonic() + 3
+        expected_repeat = "a" * repeat_count + ".size"
+        while time.monotonic() < repeat_deadline:
+            repeated_key_screen = read_vga(client, temporary)
+            if expected_repeat in repeated_key_screen:
+                break
+            time.sleep(0.05)
+        if expected_repeat not in repeated_key_screen:
             raise AssertionError(
-                "повтор одной клавиши внутри строки искажает символы\n"
+                "быстрый повтор клавиши потерян или keyboard driver остановился\n"
                 + repeated_key_screen
             )
-        press(client, "backspace")
-        press(client, "backspace")
-        press(client, "backspace")
+        for _ in range(repeat_count):
+            press(client, "backspace")
 
         press(client, "f2")
         time.sleep(0.1)
@@ -158,6 +174,19 @@ def main() -> None:
         wait_debug(process, captured, SYSINFO_OK, 1)
         wait_debug(process, captured, RUN_OK, 2)  # edit.elf + sysinfo.elf
         wait_debug(process, captured, PROMPT_READY, 4)
+
+        # Shell уже заблокирован в WAIT и не может сам обработать Ctrl+C.
+        # Terminal сообщает sessiond, тот завершает foreground по CONTROL cap,
+        # после чего shell снова показывает prompt и продолжает работать.
+        type_command(client, "run hang.elf")
+        wait_debug(process, captured, HANG_READY, 1)
+        press(client, "ctrl-c")
+        wait_debug(process, captured, FOREGROUND_INTERRUPTED, 1)
+        wait_debug(process, captured, SHELL_INTERRUPT_OK, 1)
+        wait_debug(process, captured, PROMPT_READY, 5)
+        type_command(client, "ls")
+        wait_debug(process, captured, LS_OK, 1)
+        wait_debug(process, captured, PROMPT_READY, 6)
     except (AssertionError, OSError, RuntimeError, TimeoutError) as error:
         if client is not None:
             try:
@@ -192,7 +221,7 @@ def main() -> None:
         raise SystemExit(1)
 
     print(bytes(captured).decode("utf-8", errors="replace"), end="")
-    print("VEdit-тест пройден: raw keyboard, highlighting, save, FASM build/run и VaraniaFS работают.")
+    print("VEdit-тест пройден: burst keyboard, build/run, Ctrl+C supervisor и VaraniaFS работают.")
 
 
 if __name__ == "__main__":

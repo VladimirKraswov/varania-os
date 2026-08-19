@@ -32,6 +32,7 @@ linker, чистые RX-модули можно будет дополнител�
 /system/lib/ipc.inc              IPC, backpressure, vlib_open
 /system/lib/terminal.inc         terminal.vlib ABI 1
 /system/lib/vfs.inc              filesystem.vlib ABI 1
+/system/lib/session.inc          foreground/session.vlib ABI 1
 /system/lib/process.inc          process.vlib ABI 1
 /system/lib/runtime.inc          umbrella include
 /system/lib/services/*.vlib      читаемые manifests контрактов
@@ -81,6 +82,7 @@ reply.cap[0]    = ослабленный SEND endpoint
 | `ipc.inc` | `vlib_send_retry`, `vlib_open`, `vlib_close` |
 | `terminal.inc` | connect, clear, write, raw key, цветные VGA cells |
 | `vfs.inc` | connect/detach, resolve/create/stat, streaming read/write |
+| `session.inc` | connect, push/pop foreground CONTROL capability |
 | `process.inc` | синхронный запуск ELF64 из VaraniaFS |
 | `runtime.inc` | `vlib_initialize`, `vlib_shutdown` и все модули выше |
 
