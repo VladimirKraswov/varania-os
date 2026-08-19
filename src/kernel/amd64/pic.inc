@@ -71,6 +71,27 @@ pic_unmask_irq:
   out PIC.master_data, al
   ret
 
+;// Замаскировать IRQ EDI. Драйверные IRQ используют one-shot семантику:
+;// stub маскирует линию, а SYS_IRQ_WAIT открывает её после обработки события.
+pic_mask_irq:
+  mov ecx, edi
+  cmp ecx, 8
+  jb .master
+  sub ecx, 8
+  in al, PIC.slave_data
+  mov ah, 1
+  shl ah, cl
+  or al, ah
+  out PIC.slave_data, al
+  ret
+  .master:
+  in al, PIC.master_data
+  mov ah, 1
+  shl ah, cl
+  or al, ah
+  out PIC.master_data, al
+  ret
+
 ;// Сообщить PIC о завершении обработки вектора EDI.
 pic_send_eoi:
   cmp edi, PIC.slave_offset

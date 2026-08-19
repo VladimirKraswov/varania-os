@@ -1,5 +1,5 @@
 ;//////////////////////////////////////////////////////////////////////////////
-;// IDT, исключения, IRQ и учебный системный вызов int 0x30
+;// IDT, исключения и IRQ (системные вызовы вынесены в syscall.inc)
 ;//////////////////////////////////////////////////////////////////////////////
 
 idt_descriptor:
@@ -84,7 +84,6 @@ interrupts_init:
 
   install_idt_gate 0x20, irq_0
   install_idt_gate 0x21, irq_1
-  install_idt_gate 0x30, syscall_0x30, 0, 0xEE ;// доступен из ring 3
 
   lidt [idt_descriptor]
   call pic_init
@@ -94,43 +93,66 @@ interrupts_init:
 interrupt_ignore:
   iretq
 
-;// Исключения без кода ошибки кладут синтетический ноль, чтобы общий кадр
-;// всегда имел вид [vector, error, RIP, CS, RFLAGS].
-exception_0:  push 0; push 0;  jmp exception_common
-exception_1:  push 0; push 1;  jmp exception_common
-exception_2:  push 0; push 2;  jmp exception_common
-exception_3:  push 0; push 3;  jmp exception_common
-exception_4:  push 0; push 4;  jmp exception_common
-exception_5:  push 0; push 5;  jmp exception_common
-exception_6:  push 0; push 6;  jmp exception_common
-exception_7:  push 0; push 7;  jmp exception_common
-exception_8:          push 8;  jmp exception_common ;// CPU уже положил error
-exception_9:  push 0; push 9;  jmp exception_common
-exception_10:         push 10; jmp exception_common
-exception_11:         push 11; jmp exception_common
-exception_12:         push 12; jmp exception_common
-exception_13:         push 13; jmp exception_common
-exception_14:         push 14; jmp exception_common
-exception_15: push 0; push 15; jmp exception_common
-exception_16: push 0; push 16; jmp exception_common
-exception_17:         push 17; jmp exception_common
-exception_18: push 0; push 18; jmp exception_common
-exception_19: push 0; push 19; jmp exception_common
-exception_20: push 0; push 20; jmp exception_common
-exception_21:         push 21; jmp exception_common
-exception_22: push 0; push 22; jmp exception_common
-exception_23: push 0; push 23; jmp exception_common
-exception_24: push 0; push 24; jmp exception_common
-exception_25: push 0; push 25; jmp exception_common
-exception_26: push 0; push 26; jmp exception_common
-exception_27: push 0; push 27; jmp exception_common
-exception_28: push 0; push 28; jmp exception_common
-exception_29:         push 29; jmp exception_common
-exception_30:         push 30; jmp exception_common
-exception_31: push 0; push 31; jmp exception_common
+;// Генератор исключений не даёт 32 stub-ам разойтись. Если CPU не
+;// кладёт error code, макрос добавляет ноль. Общий кадр всегда имеет вид
+;// [vector, error, RIP, CS, RFLAGS, (RSP, SS при смене CPL)].
+macro exception_stub name, vector, cpu_error
+{
+  name:
+  if cpu_error = 0
+    push 0
+  end if
+  push vector
+  jmp exception_common
+}
+
+exception_stub exception_0,   0, 0
+exception_stub exception_1,   1, 0
+exception_stub exception_2,   2, 0
+exception_stub exception_3,   3, 0
+exception_stub exception_4,   4, 0
+exception_stub exception_5,   5, 0
+exception_stub exception_6,   6, 0
+exception_stub exception_7,   7, 0
+exception_stub exception_8,   8, 1
+exception_stub exception_9,   9, 0
+exception_stub exception_10, 10, 1
+exception_stub exception_11, 11, 1
+exception_stub exception_12, 12, 1
+exception_stub exception_13, 13, 1
+exception_stub exception_14, 14, 1
+exception_stub exception_15, 15, 0
+exception_stub exception_16, 16, 0
+exception_stub exception_17, 17, 1
+exception_stub exception_18, 18, 0
+exception_stub exception_19, 19, 0
+exception_stub exception_20, 20, 0
+exception_stub exception_21, 21, 1
+exception_stub exception_22, 22, 0
+exception_stub exception_23, 23, 0
+exception_stub exception_24, 24, 0
+exception_stub exception_25, 25, 0
+exception_stub exception_26, 26, 0
+exception_stub exception_27, 27, 0
+exception_stub exception_28, 28, 0
+exception_stub exception_29, 29, 1
+exception_stub exception_30, 30, 1
+exception_stub exception_31, 31, 0
 
 exception_common:
   push_all_registers
+  ;// CS в аппаратном кадре точно показывает CPL, с которого пришла ошибка.
+  ;// Ring-3 fault локализуем в процессе; ring-0 fault остаётся kernel panic.
+  test byte [rsp+144], 3
+  jz .kernel_fault
+  mov rdi, [rsp+120]
+  call exception_terminate_user
+  mov rdi, rsp
+  call scheduler_switch
+  mov rsp, rax
+  pop_all_registers
+  iretq
+  .kernel_fault:
   mov rdi, [rsp+120]               ;// номер вектора
   mov rsi, [rsp+128]               ;// настоящий или синтетический error code
   mov rdx, [rsp+136]               ;// RIP, сохранённый процессором
@@ -146,23 +168,24 @@ irq_0:
   call pit_on_irq
   mov edi, 0x20
   call pic_send_eoi
+  cmp byte [scheduler_is_idle], 0
+  jne .resume_idle
+  ;// IRQ и SYSCALL создают один формат Context. Возврат с другим RSP
+  ;// означает, что IRETQ возобновит уже другую ring-3 задачу.
+  mov rdi, rsp
+  call scheduler_switch
+  mov rsp, rax
+  .resume_idle:
   pop_all_registers
   iretq
 
 irq_1:
   push_all_registers
-  call keyboard_on_irq
+  mov edi, 1
+  call pic_mask_irq                  ;// one-shot: драйвер повторно откроет IRQ через SYS_IRQ_WAIT
+  mov edi, 1
+  call device_irq_notify
   mov edi, 0x21
   call pic_send_eoi
-  pop_all_registers
-  iretq
-
-;// Учебный системный вызов: RSI указывает на строку, как в исходной Varania.
-;// Пока пользовательского режима нет, но DPL=3 уже позволяет сохранить ABI
-;// при его добавлении. Все регистры вызывающего кода восстанавливаются.
-syscall_0x30:
-  push_all_registers
-  mov rdi, [rsp+72]                 ;// сохранённое значение RSI
-  call print_string
   pop_all_registers
   iretq

@@ -25,12 +25,12 @@ VGA.light_magenta = 13
 VGA.yellow        = 14
 VGA.white         = 15
 
-vga_buffer      dq 0xB8000
+vga_buffer      dq HHDM.base+0xB8000
 vga_cursor_port dw 0x3D4
 
 ;// Прочитать адрес CRT-контроллера из области данных BIOS.
 vga_init:
-  mov eax, 0x463
+  mov rax, HHDM.base+0x463
   mov ax, [rax]
   test ax, ax
   jnz .save_port

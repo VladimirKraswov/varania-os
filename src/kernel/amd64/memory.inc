@@ -1,62 +1,39 @@
 ;//////////////////////////////////////////////////////////////////////////////
-;// VMM и простая куча ядра
+;// VMM — изолированные 64-битные адресные пространства
 ;//////////////////////////////////////////////////////////////////////////////
+;
+;// Каждая ring-3 задача имеет собственный PML4. Нижняя половина заполняется
+;// отдельно, а PML4[256] ссылается на общий supervisor-only HHDM. Поэтому смена
+;// CR3 не лишает ядро доступа к коду, стекам и таблицам страниц.
 
-vmm_next_table dq PT.FREE
-heap_next      dq HEAP.base
-
-;// Подготовить физическую память, пул таблиц страниц и линейную кучу.
-memory_init:
+function memory_init
   call pmm_init
-  mov qword [vmm_next_table], PT.FREE
-  mov rax, HEAP.base
-  mov [heap_next], rax
-  ret
+  call slab_init
+endf
 
-;// Выделить RDI байт в куче. Память не освобождается: для небольшого учебного
-;// ядра bump allocator прозрачен и достаточен. Возвращает RAX=0 при нехватке.
-heap_alloc:
-  test rdi, rdi
-  jz .failed
-  add rdi, 15
-  and rdi, -16                    ;// выравнивание для данных и будущего ABI C
-  mov rax, [heap_next]
-  lea rdx, [rax+rdi]
-  mov rcx, HEAP.base+HEAP.size
-  cmp rdx, rcx
-  ja .failed
-  mov [heap_next], rdx
-  ret
-  .failed:
-  xor eax, eax
-  ret
-
-;// Выдать и обнулить новую таблицу страниц из резервного пула загрузчика.
-;// Таблицы лежат ниже 1 MiB и доступны через identity mapping.
-vmm_alloc_table:
-  mov rax, [vmm_next_table]
-  cmp rax, PT.FREE+PT.FREE_PAGES*PAGE_SIZE
-  jae .failed
-  lea rdx, [rax+PAGE_SIZE]
-  mov [vmm_next_table], rdx
+;// Выделить и обнулить таблицу страниц. RAX=физический адрес или 0.
+function vmm_alloc_table
+  call pmm_alloc_frame
+  test rax, rax
+  jz .done
   push rax
-  mov rdi, rax
+  hhdm_address rdi, rax
   xor eax, eax
   mov ecx, PAGE_SIZE/8
   cld
   rep stosq
   pop rax
-  ret
-  .failed:
-  xor eax, eax
-  ret
+  .done:
+endf
 
 ;// Найти или создать таблицу следующего уровня.
-;// RDI = физический адрес таблицы, RSI = индекс записи. Возвращает физический
-;// адрес следующей таблицы или ноль. Все таблицы проекта ниже 4 GiB.
-vmm_next_level:
+;// RDI=физ. таблица, RSI=индекс, RDX=флаги будущей страницы. RAX=физ. адрес.
+function vmm_next_level
   push rbx
-  lea rbx, [rdi+rsi*8]
+  push r12
+  mov r12, rdx
+  hhdm_address rbx, rdi
+  lea rbx, [rbx+rsi*8]
   test byte [rbx], PAGE.P
   jnz .present
   call vmm_alloc_table
@@ -64,72 +41,185 @@ vmm_next_level:
   jz .done
   mov rcx, rax
   or rcx, PAGE.P+PAGE.RW
+  test r12, PAGE.US
+  jz .store
+  or rcx, PAGE.US                  ;// U/S нужен на каждом уровне
+  .store:
   mov [rbx], rcx
   jmp .done
   .present:
-  mov eax, [rbx]
-  and eax, 0xFFFFF000
+  test r12, PAGE.US
+  jz .read_address
+  or qword [rbx], PAGE.US
+  .read_address:
+  mov rax, [rbx]
+  ;// PMM этой версии ограничен 1 GiB, поэтому достаточно
+  ;// очистить младшие флаги в EAX; у AND r64 нет кодировки imm64.
+  and eax, -PAGE_SIZE
   .done:
+  pop r12
   pop rbx
-  ret
+endf
 
-;// Отобразить физический кадр RSI по виртуальному адресу RDI.
-;// RDX содержит PAGE.RW/PAGE.US; Present добавляется автоматически.
-;// Возвращает RAX=1 при успехе, RAX=0 при нехватке таблиц.
-vmm_map_page:
+;// Отобразить один кадр в заданном PML4.
+;// RDI=pml4_phys, RSI=virtual, RDX=physical, RCX=PAGE.RW/PAGE.US.
+function vmm_map_in_space
   push rbx
   push r12
   push r13
   push r14
   push r15
-  mov r12, rdi                    ;// виртуальный адрес
-  mov r13, rsi                    ;// физический адрес
-  mov r14, rdx                    ;// флаги
-  mov r15, cr3
+  sub rsp, 8                       ;// 16-байтное выравнивание перед вложенными call
+  mov r12, rdi
+  mov r13, rsi
+  mov r14, rdx
+  mov r15, rcx
 
-  mov rsi, r12
+  mov rdi, r12
+  mov rsi, r13
   shr rsi, 39
   and esi, 0x1FF
-  mov rdi, r15
+  mov rdx, r15
   call vmm_next_level
   test rax, rax
   jz .failed
 
   mov rdi, rax
-  mov rsi, r12
+  mov rsi, r13
   shr rsi, 30
   and esi, 0x1FF
+  mov rdx, r15
   call vmm_next_level
   test rax, rax
   jz .failed
 
   mov rdi, rax
-  mov rsi, r12
+  mov rsi, r13
   shr rsi, 21
   and esi, 0x1FF
+  mov rdx, r15
   call vmm_next_level
   test rax, rax
   jz .failed
 
-  mov rbx, r12
-  shr rbx, 12
-  and ebx, 0x1FF
-  lea rbx, [rax+rbx*8]
+  hhdm_address rbx, rax
   mov rax, r13
+  shr rax, 12
+  and eax, 0x1FF
+  lea rbx, [rbx+rax*8]
+  mov rax, r14
   and rax, -PAGE_SIZE
-  or rax, r14
+  or rax, r15
   or rax, PAGE.P
   mov [rbx], rax
-  invlpg [r12]
   mov eax, 1
   jmp .done
-
   .failed:
   xor eax, eax
   .done:
+  add rsp, 8
   pop r15
   pop r14
   pop r13
   pop r12
   pop rbx
-  ret
+endf
+
+;// Создать пустое пространство задачи. RAX=физ. PML4 или 0.
+function vmm_create_space
+  call vmm_alloc_table
+  test rax, rax
+  jz .done
+  hhdm_address rdx, rax
+  hhdm_address rcx, PT.PML4
+  mov rcx, [rcx+256*8]
+  mov [rdx+256*8], rcx
+  .done:
+endf
+
+;// Проверить user-адрес и перевести его в физический.
+;// RDI=pml4_phys, RSI=virtual. RAX=physical или 0.
+;// Каждый уровень обязан иметь P=1 и U/S=1: проверка только PTE
+;// была бы классической ошибкой валидации указателей.
+function vmm_translate_user
+  push rbx
+  push r12
+  mov r12, rsi
+  mov rax, rdi
+
+  hhdm_address rbx, rax
+  mov rcx, r12
+  shr rcx, 39
+  and ecx, 0x1FF
+  mov rax, [rbx+rcx*8]
+  mov rdx, rax
+  and edx, PAGE.P+PAGE.US
+  cmp edx, PAGE.P+PAGE.US
+  jne .invalid
+  and eax, -PAGE_SIZE
+
+  hhdm_address rbx, rax
+  mov rcx, r12
+  shr rcx, 30
+  and ecx, 0x1FF
+  mov rax, [rbx+rcx*8]
+  mov rdx, rax
+  and edx, PAGE.P+PAGE.US
+  cmp edx, PAGE.P+PAGE.US
+  jne .invalid
+  test al, PAGE.PS
+  jnz .invalid                     ;// user-карты микроядра пока только 4 KiB
+  and eax, -PAGE_SIZE
+
+  hhdm_address rbx, rax
+  mov rcx, r12
+  shr rcx, 21
+  and ecx, 0x1FF
+  mov rax, [rbx+rcx*8]
+  mov rdx, rax
+  and edx, PAGE.P+PAGE.US
+  cmp edx, PAGE.P+PAGE.US
+  jne .invalid
+  test al, PAGE.PS
+  jnz .invalid
+  and eax, -PAGE_SIZE
+
+  hhdm_address rbx, rax
+  mov rcx, r12
+  shr rcx, 12
+  and ecx, 0x1FF
+  mov rax, [rbx+rcx*8]
+  mov rdx, rax
+  and edx, PAGE.P+PAGE.US
+  cmp edx, PAGE.P+PAGE.US
+  jne .invalid
+  and eax, -PAGE_SIZE
+  mov rdx, r12
+  and edx, PAGE_SIZE-1
+  add rax, rdx
+  jmp .done
+
+  .invalid:
+  xor eax, eax
+  .done:
+  pop r12
+  pop rbx
+endf
+
+;// Совместимый со старым демо интерфейс: отобразить в текущем CR3.
+function vmm_map_page
+  push r12
+  sub rsp, 8
+  mov r12, rdi
+  mov rcx, rdx
+  mov rdx, rsi
+  mov rsi, rdi
+  mov rdi, cr3
+  call vmm_map_in_space
+  test rax, rax
+  jz .done
+  invlpg [r12]
+  .done:
+  add rsp, 8
+  pop r12
+endf

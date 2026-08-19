@@ -126,14 +126,16 @@ GDT64_SRC:
   dq 0x00CF92000000FFFF    ;// data32 (0x10)
   dq 0x00209A000000FFFF    ;// code64 (0x18) - L=1
   dq 0x00CF92000000FFFF    ;// data64 (0x20)
-  ;// TSS64 (селектор 0x28): limit, base, access=0x89, flags, base[63:32]
+  dq 0x00CFF2000000FFFF    ;// user data64 (0x28), DPL=3
+  dq 0x0020FA000000FFFF    ;// user code64 (0x30), DPL=3, L=1
+  ;// TSS64 (селектор 0x38): limit, base, access=0x89, flags, base[63:32]
   dw  TSS64.size-1                         ;// Limit[15:0]
-  dw  TSS64.base mod 0x10000               ;// Base[15:0]
-  db  (TSS64.base shr 16) mod 0x100        ;// Base[23:16]
+  dw  (HHDM.base+TSS64.base) mod 0x10000   ;// Base[15:0]
+  db  ((HHDM.base+TSS64.base) shr 16) mod 0x100 ;// Base[23:16]
   db  0x89                                 ;// Present + available 64-bit TSS
   db  ((TSS64.size-1) shr 16) mod 0x10     ;// Flags=0, Limit[19:16]
-  db  (TSS64.base shr 24) mod 0x100        ;// Base[31:24]
-  dd  TSS64.base shr 32                    ;// Base[63:32]
+  db  ((HHDM.base+TSS64.base) shr 24) mod 0x100 ;// Base[31:24]
+  dd  (HHDM.base+TSS64.base) shr 32        ;// Base[63:32]
   dd  0                                    ;// Зарезервировано архитектурой
 GDT64_SRC_END:
 GDTR64:
@@ -180,43 +182,22 @@ stage32:
   mov edi, PT.PD_ID
   mov ecx, 1024
   rep stosd
-  mov edi, PT.PT_HI0
-  mov ecx, 1024
-  rep stosd
-  mov edi, PT.PT_HI1
-  mov ecx, 1024
-  rep stosd
-
-  ;// PD_ID: identity-карта 0..8 MiB (4 x 2 MiB страницы)
-  ;// Примечание: FASM не поддерживает `|` в константах, используем `+`
-  ;// (флаги PAGE не пересекаются по битам: P=1, RW=2, PS=0x80 => 0x83)
-  mov dword [PT.PD_ID+0],  0x000000 + PAGE.P+PAGE.RW+PAGE.PS
-  mov dword [PT.PD_ID+8],  0x200000 + PAGE.P+PAGE.RW+PAGE.PS
-  mov dword [PT.PD_ID+16], 0x400000 + PAGE.P+PAGE.RW+PAGE.PS
-  mov dword [PT.PD_ID+24], 0x600000 + PAGE.P+PAGE.RW+PAGE.PS
+  ;// Identity и HHDM отображают одинаковые 0..1 GiB большими
+  ;// страницами 2 MiB. U/S не установлен: ring 3 не видит HHDM.
+  xor eax, eax
+  mov edi, PT.PD_ID
+  mov esi, PT.PD_HI
+  mov ecx, PT.DIRECT_PAGES
+  .fill_direct:
+    mov edx, eax
+    or edx, PAGE.P+PAGE.RW+PAGE.PS
+    mov [edi], edx
+    mov [esi], edx
+    add eax, PAGE_SIZE_2M
+    add edi, 8
+    add esi, 8
+    loop .fill_direct
   mov dword [PT.PDPT_ID+0], PT.PD_ID + PAGE.P+PAGE.RW
-
-  ;// Верхняя половина: 1024 обычные страницы по 4 KiB.
-  ;// Физическая база 0x100000 не выровнена на 2 MiB, поэтому флаг PS здесь
-  ;// использовать нельзя: процессор посчитал бы PDE зарезервированным.
-  mov eax, PT.HI_PHYS + PAGE.P+PAGE.RW
-  mov edi, PT.PT_HI0
-  mov ecx, 512
-  .fill_hi0:
-    mov [edi], eax
-    add eax, PAGE_SIZE
-    add edi, 8
-    loop .fill_hi0
-  mov edi, PT.PT_HI1
-  mov ecx, 512
-  .fill_hi1:
-    mov [edi], eax
-    add eax, PAGE_SIZE
-    add edi, 8
-    loop .fill_hi1
-
-  mov dword [PT.PD_HI+0], PT.PT_HI0 + PAGE.P+PAGE.RW
-  mov dword [PT.PD_HI+8], PT.PT_HI1 + PAGE.P+PAGE.RW
   mov dword [PT.PDPT_HI+0], PT.PD_HI + PAGE.P+PAGE.RW
 
   ;// PML4: identity (0) и верхняя половина (256)

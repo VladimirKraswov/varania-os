@@ -7,6 +7,8 @@ exception_vector_text db "Vector: ", 0
 exception_error_text  db "  Error: ", 0
 exception_rip_text    db "  RIP: ", 0
 exception_unknown     db "Unknown exception", 0
+exception_user_text   db "microkernel: terminated user task ", 0
+exception_user_vector db " after exception ", 0
 
 exception_name_0  db "#DE: divide error", 0
 exception_name_1  db "#DB: debug", 0
@@ -93,3 +95,26 @@ exception_dispatch:
   mov edi, PRINT.newline
   call print_char
   jmp cpu_halt_forever
+
+;// Исключение из ring 3 — ошибка одного сервиса, а не ошибка всей ОС.
+;// RDI=vector. Задача помечается EXITED; общий stub запустит следующую.
+function exception_terminate_user
+  push rbx
+  sub rsp, 8
+  mov ebx, edi
+  lea rdi, [exception_user_text]
+  call print_string
+  mov edi, [current_task]
+  call print_udec64
+  lea rdi, [exception_user_vector]
+  call print_string
+  mov edi, ebx
+  call print_hex64
+  mov edi, PRINT.newline
+  call print_char
+  mov edi, [current_task]
+  call task_by_index
+  mov qword [rax+Task.state], TASK_EXITED
+  add rsp, 8
+  pop rbx
+endf
