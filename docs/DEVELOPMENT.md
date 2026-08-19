@@ -70,6 +70,13 @@ make run
 shell показывает `varania:/$`. Команда `ls` выводит `bin/`, `etc/`, `home/` и
 `README`; доступны также `cd`, `mkdir`, `touch`, `pwd`, `clear`, `help`.
 
+На macOS Cocoa display запускается полноэкранно с `zoom-to-fit`, чтобы VGA
+80×25 не был слишком мелким на Retina. Для обычного масштабируемого окна:
+
+```bash
+VARANIA_QEMU_FULLSCREEN=0 make run
+```
+
 Для диагностического вывода без окна:
 
 ```bash

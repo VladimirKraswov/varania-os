@@ -122,6 +122,8 @@ RAMFS не имеет пользователей, UID/GID, mode bits и `sudo`: 
 | `make debug` | QEMU с `qemu-debug.log` |
 
 Совместимая оболочка старого проекта: `./c.sh build|test|run`.
+На macOS `make run` открывает масштабированную полноэкранную Cocoa VM;
+`VARANIA_QEMU_FULLSCREEN=0 make run` оставляет изменяемое окно.
 
 ## Как загружается user space
 
