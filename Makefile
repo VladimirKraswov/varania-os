@@ -67,8 +67,8 @@ $(DISK_IMAGE): $(BOOT_PREFIX) $(SYSROOT_INPUTS) $(USER_ELFS)
 	cp -R build/user build/sysroot/root/system/build/user
 	cp -R build/sysroot/fasm/source build/sysroot/root/system/tools/fasm/source
 	cp Makefile README.md BOOT.BIN KERNEL.BIN INITRAMFS.BIN build/sysroot/root/system/
-	cp build/sysroot/fasm/FASM.TXT build/sysroot/fasm/WHATSNEW.TXT \
-	  build/sysroot/root/system/tools/fasm/
+	cp build/sysroot/fasm/fasm.txt build/sysroot/root/system/tools/fasm/FASM.TXT
+	cp build/sysroot/fasm/whatsnew.txt build/sysroot/root/system/tools/fasm/WHATSNEW.TXT
 	cp $(BOOT_PREFIX) $@
 	python3 $(VAFS_TOOL) format $@ --size $(DISK_SIZE) --offset $(VAFS_OFFSET) \
 	  --uuid $(VAFS_BOOT_UUID) --device ssd
