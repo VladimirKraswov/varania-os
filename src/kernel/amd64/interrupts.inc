@@ -145,6 +145,16 @@ exception_common:
   ;// Ring-3 fault локализуем в процессе; ring-0 fault остаётся kernel panic.
   test byte [rsp+144], 3
   jz .kernel_fault
+  cmp qword [rsp+120], 14          ;// #PF может быть demand-growth стека
+  jne .terminate_user
+  mov rdi, [rsp+128]
+  call task_handle_page_fault
+  test rax, rax
+  jz .terminate_user
+  pop_all_registers
+  add rsp, 16                      ;// vector + error code
+  iretq
+  .terminate_user:
   mov rdi, [rsp+120]
   call exception_terminate_user
   mov rdi, rsp

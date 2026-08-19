@@ -97,7 +97,7 @@ exception_dispatch:
   jmp cpu_halt_forever
 
 ;// Исключение из ring 3 — ошибка одного сервиса, а не ошибка всей ОС.
-;// RDI=vector. Задача помечается EXITED; общий stub запустит следующую.
+;// RDI=vector. Статус 128+vector сможет получить родитель через SYS_WAIT.
 function exception_terminate_user
   push rbx
   sub rsp, 8
@@ -112,9 +112,8 @@ function exception_terminate_user
   call print_hex64
   mov edi, PRINT.newline
   call print_char
-  mov edi, [current_task]
-  call task_by_index
-  mov qword [rax+Task.state], TASK_EXITED
+  lea edi, [ebx+128]
+  call task_mark_exit
   add rsp, 8
   pop rbx
 endf

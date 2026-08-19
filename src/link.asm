@@ -6,3 +6,4 @@
 
 boot   file "../BOOT.BIN"   ;// Записать загрузчик
 kernel file "../KERNEL.BIN" ;// Дописать ядро
+initrd file "../INITRAMFS.BIN" ;// ELF-программы пользовательского пространства

@@ -8,7 +8,7 @@
 ;// ему остальное железо.
 
 DEVICE_IRQ_COUNT = 16
-irq_owner  rb DEVICE_IRQ_COUNT       ;// task index+1
+irq_owner  rq DEVICE_IRQ_COUNT       ;// generation-safe task token
 irq_pending rb DEVICE_IRQ_COUNT      ;// один накопленный event
 
 ;// RDI=owner, RSI=base port, RDX=length, RCX=CAP_READ/CAP_WRITE. RAX=handle.
@@ -25,12 +25,14 @@ endf
 function capability_grant_irq
   push rbx
   push r12
+  push r13
+  sub rsp, 8
   mov r12, rdi
   mov rbx, rsi
   cmp rbx, DEVICE_IRQ_COUNT
   jae .failed
   lea rax, [irq_owner]
-  cmp byte [rax+rbx], 0
+  cmp qword [rax+rbx*8], 0
   jne .failed
   mov edx, ebx
   inc edx                            ;// object=IRQ+1, чтобы ноль остался invalid
@@ -39,13 +41,19 @@ function capability_grant_irq
   call capability_insert
   test rax, rax
   jz .failed
-  lea edx, [r12+1]
+  mov r13, rax
+  mov edi, r12d
+  call task_by_index
+  mov rdx, [rax+Task.token]
   lea rcx, [irq_owner]
-  mov [rcx+rbx], dl
+  mov [rcx+rbx*8], rdx
+  mov rax, r13
   jmp .done
   .failed:
   xor eax, eax
   .done:
+  add rsp, 8
+  pop r13
   pop r12
   pop rbx
 endf
@@ -114,11 +122,12 @@ function device_irq_notify
   cmp rbx, DEVICE_IRQ_COUNT
   jae .done
   lea rax, [irq_owner]
-  movzx edi, byte [rax+rbx]
-  test edi, edi
+  mov rdi, [rax+rbx*8]
+  test rdi, rdi
   jz .done
-  dec edi
-  call task_by_index
+  call task_from_token
+  test rax, rax
+  jz .done
   cmp qword [rax+Task.state], TASK_BLOCKED_IRQ
   jne .remember
   cmp [rax+Task.wait_irq], rbx
@@ -136,14 +145,87 @@ function device_irq_notify
   pop rbx
 endf
 
+;// При завершении драйвера вернуть принадлежавшие ему IRQ ядру.
+;// RDI=task token.
+leaf_function device_release_task
+  lea rdx, [irq_owner]
+  xor eax, eax
+  .scan:
+    cmp [rdx+rax*8], rdi
+    jne .next
+    mov qword [rdx+rax*8], 0
+    lea rcx, [irq_pending]
+    mov byte [rcx+rax], 0
+  .next:
+    inc eax
+    cmp eax, DEVICE_IRQ_COUNT
+    jb .scan
+end_leaf
+
+;// IRQ capability уникальна: после успешного SYS_SPAWN она переезжает к
+;// ребёнку, в отличие от обычных копируемых process/I/O capabilities.
+;// RDI=child TCB, RSI=parent TCB.
+function device_commit_irq_transfers
+  push rbx
+  push r12
+  push r13
+  push r14
+  mov r12, rdi
+  mov r13, rsi
+  xor ebx, ebx
+  .child_slot:
+    cmp qword [r12+Task.cap_type+rbx*8], CAP_IRQ
+    jne .next_child
+    mov r14, [r12+Task.cap_target+rbx*8]
+    test r14, r14
+    jz .next_child
+    xor ecx, ecx
+  .parent_slot:
+      cmp qword [r13+Task.cap_type+rcx*8], CAP_IRQ
+      jne .next_parent
+      cmp [r13+Task.cap_target+rcx*8], r14
+      jne .next_parent
+      mov qword [r13+Task.cap_target+rcx*8], 0
+      mov qword [r13+Task.cap_rights+rcx*8], 0
+      mov qword [r13+Task.cap_type+rcx*8], 0
+    .next_parent:
+      inc ecx
+      cmp ecx, CAP_SLOTS
+      jb .parent_slot
+    mov rax, r14
+    dec rax
+    cmp rax, DEVICE_IRQ_COUNT
+    jae .next_child
+    mov rdx, [r12+Task.token]
+    lea rcx, [irq_owner]
+    mov [rcx+rax*8], rdx
+  .next_child:
+    inc ebx
+    cmp ebx, CAP_SLOTS
+    jb .child_slot
+  pop r14
+  pop r13
+  pop r12
+  pop rbx
+endf
+
 ;// RDI=handle. RAX=IRQ и RCX=1, либо RCX=0 и задача уже переведена в BLOCKED.
 function device_irq_wait
+  push rbx
+  sub rsp, 8
   mov esi, CAP_IRQ
   mov edx, CAP_WAIT
   call capability_lookup
   test rax, rax
   jz .denied
   dec rax                            ;// object хранит IRQ+1
+  mov rbx, rax
+  mov edi, [current_task]
+  call task_by_index
+  mov rcx, [rax+Task.token]
+  lea rdx, [irq_owner]
+  mov [rdx+rbx*8], rcx              ;// capability начинает маршрутизировать IRQ
+  mov rax, rbx
   lea rdx, [irq_pending]
   cmp byte [rdx+rax], 0
   je .block
@@ -172,4 +254,6 @@ function device_irq_wait
   mov rax, IPC_BAD_HANDLE
   mov ecx, 1
   .done:
+  add rsp, 8
+  pop rbx
 endf

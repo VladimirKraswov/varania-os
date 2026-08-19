@@ -85,6 +85,11 @@ BOOT2.start:
   ;// Загрузка ядра во временный буфер (16-битный DMA, ниже 1 MiB)
   disk.load_sectors [disk_id], 0, KERNEL.firstSector, KERNEL.size/512, KERNEL.tempBase
 
+  ;// Initramfs также сначала читается ниже 1 MiB: классический BIOS EDD
+  ;// использует 16-битный адрес Segment:Offset. После входа в protected mode
+  ;// архив будет перенесён по постоянному физическому адресу 0x400000.
+  disk.load_sectors [disk_id], 0, INITRAMFS.firstSector, INITRAMFS.sectors, INITRAMFS.tempBase
+
   ;// Получаем от BIOS карту памяти (E820)
   include "../kernel/memory/meminfo.inc"
   meminfo.get_smap SMAP.segment, SMAP.offset
@@ -208,6 +213,13 @@ stage32:
   mov esi, KERNEL.tempBase
   mov edi, KERNEL.physBase
   mov ecx, KERNEL.size/4
+  rep movsd
+
+  ;// Архив пользовательских ELF не является частью ядра и остаётся
+  ;// read-only bootstrap-данными. Его адрес зарезервирован ниже PMM.memStart.
+  mov esi, INITRAMFS.tempBase
+  mov edi, INITRAMFS.physBase
+  mov ecx, INITRAMFS.size/4
   rep movsd
 
   ;// Long mode требует PAE, EFER.LME и paging — именно в таком порядке.

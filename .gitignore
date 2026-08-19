@@ -2,6 +2,7 @@
 .cache/
 .opencode/
 build_test/
+build/
 
 # Диагностические файлы QEMU
 *.log

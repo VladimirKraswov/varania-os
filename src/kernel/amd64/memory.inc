@@ -223,3 +223,205 @@ function vmm_map_page
   add rsp, 8
   pop r12
 endf
+
+;// Выделить, обнулить и отобразить user-страницу.
+;// RDI=pml4, RSI=virtual, RDX=flags. RAX=physical или 0.
+function vmm_alloc_user_page
+  push rbx
+  push r12
+  push r13
+  push r14
+  mov r12, rdi
+  mov r13, rsi
+  mov rbx, rdx
+  call pmm_alloc_frame
+  test rax, rax
+  jz .failed
+  mov r14, rax
+  push rax
+  sub rsp, 8
+  hhdm_address rdi, rax
+  xor esi, esi
+  mov edx, PAGE_SIZE
+  call memory_set
+  add rsp, 8
+  pop rdx
+  mov rdi, r12
+  mov rsi, r13
+  mov rcx, rbx
+  call vmm_map_in_space
+  test rax, rax
+  jz .free_frame
+  mov rax, r14
+  jmp .done
+  .free_frame:
+  mov rdi, r14
+  call pmm_free_frame
+  .failed:
+  xor eax, eax
+  .done:
+  pop r14
+  pop r13
+  pop r12
+  pop rbx
+endf
+
+;// Удалить одну 4-KiB mapping и вернуть физический кадр, но не освобождать его.
+;// RDI=pml4, RSI=virtual. RAX=physical или 0.
+function vmm_unmap_in_space
+  push rbx
+  push r12
+  mov r12, rsi
+  hhdm_address rbx, rdi
+
+  mov rcx, r12
+  shr rcx, 39
+  and ecx, 0x1FF
+  mov rax, [rbx+rcx*8]
+  test al, PAGE.P
+  jz .missing
+  and eax, -PAGE_SIZE
+  hhdm_address rbx, rax
+
+  mov rcx, r12
+  shr rcx, 30
+  and ecx, 0x1FF
+  mov rax, [rbx+rcx*8]
+  test al, PAGE.P
+  jz .missing
+  test al, PAGE.PS
+  jnz .missing
+  and eax, -PAGE_SIZE
+  hhdm_address rbx, rax
+
+  mov rcx, r12
+  shr rcx, 21
+  and ecx, 0x1FF
+  mov rax, [rbx+rcx*8]
+  test al, PAGE.P
+  jz .missing
+  test al, PAGE.PS
+  jnz .missing
+  and eax, -PAGE_SIZE
+  hhdm_address rbx, rax
+
+  mov rcx, r12
+  shr rcx, 12
+  and ecx, 0x1FF
+  lea rbx, [rbx+rcx*8]
+  mov rax, [rbx]
+  test al, PAGE.P
+  jz .missing
+  mov qword [rbx], 0
+  and eax, -PAGE_SIZE
+  invlpg [r12]
+  jmp .done
+  .missing:
+  xor eax, eax
+  .done:
+  pop r12
+  pop rbx
+endf
+
+;// Освобождение address space идёт снизу вверх: сначала leaf-кадры, затем
+;// PT, PD, PDPT и PML4. Верхняя половина не трогается — это общая HHDM-ветвь.
+function vmm_destroy_pt
+  push rbx
+  push r12
+  mov r12, rdi
+  hhdm_address rbx, r12
+  xor ecx, ecx
+  .leaf:
+    mov rdi, [rbx+rcx*8]
+    test dil, PAGE.P
+    jz .next
+    and edi, -PAGE_SIZE
+    push rcx
+    call pmm_free_frame
+    pop rcx
+  .next:
+    inc ecx
+    cmp ecx, 512
+    jb .leaf
+  mov rdi, r12
+  call pmm_free_frame
+  pop r12
+  pop rbx
+endf
+
+function vmm_destroy_pd
+  push rbx
+  push r12
+  mov r12, rdi
+  hhdm_address rbx, r12
+  xor ecx, ecx
+  .entry:
+    mov rdi, [rbx+rcx*8]
+    test dil, PAGE.P
+    jz .next
+    test dil, PAGE.PS
+    jnz .next                    ;// user space микроядра huge pages не создаёт
+    and edi, -PAGE_SIZE
+    push rcx
+    call vmm_destroy_pt
+    pop rcx
+  .next:
+    inc ecx
+    cmp ecx, 512
+    jb .entry
+  mov rdi, r12
+  call pmm_free_frame
+  pop r12
+  pop rbx
+endf
+
+function vmm_destroy_pdpt
+  push rbx
+  push r12
+  mov r12, rdi
+  hhdm_address rbx, r12
+  xor ecx, ecx
+  .entry:
+    mov rdi, [rbx+rcx*8]
+    test dil, PAGE.P
+    jz .next
+    test dil, PAGE.PS
+    jnz .next
+    and edi, -PAGE_SIZE
+    push rcx
+    call vmm_destroy_pd
+    pop rcx
+  .next:
+    inc ecx
+    cmp ecx, 512
+    jb .entry
+  mov rdi, r12
+  call pmm_free_frame
+  pop r12
+  pop rbx
+endf
+
+;// RDI=physical PML4. Вызывать только после перехода на другой CR3.
+function vmm_destroy_space
+  push rbx
+  push r12
+  mov r12, rdi
+  hhdm_address rbx, r12
+  xor ecx, ecx
+  .lower_half:
+    mov rdi, [rbx+rcx*8]
+    test dil, PAGE.P
+    jz .next
+    and edi, -PAGE_SIZE
+    push rcx
+    call vmm_destroy_pdpt
+    pop rcx
+  .next:
+    inc ecx
+    cmp ecx, 256
+    jb .lower_half
+  mov rdi, r12
+  call pmm_free_frame
+  pop r12
+  pop rbx
+endf

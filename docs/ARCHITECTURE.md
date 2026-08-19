@@ -2,146 +2,160 @@
 
 ## Доверенная граница
 
-Микроядро работает в ring 0 и содержит только механизмы, требующие привилегий:
+В ring 0 остаются механизмы, которым действительно нужны привилегии:
 
-- обработку исключений и IRQ;
-- физическую и виртуальную память;
+- исключения, IRQ, PIC/PIT и вход `SYSCALL`;
+- PMM/VMM, создание и разрушение address spaces;
 - переключение контекста и планирование;
-- проверку capabilities, IPC и безопасное копирование из user space;
-- минимальный VGA/debug-вывод для диагностики ранней загрузки.
+- проверка capabilities, IPC и копирование через user/kernel boundary;
+- проверка initramfs/ELF и минимальный ранний debug output.
 
-Сервисы и драйверы работают в ring 3. Они не видят HHDM, таблицы ядра, TCB и
-чужую память. Драйвер получает не IOPL, а два узких дескриптора: конкретный IRQ
-и конкретный диапазон I/O-портов.
+Политика запуска вынесена в ring 3: `init` выбирает программы, создаёт сервисы,
+передаёт им capabilities и ждёт их завершения. Драйвер клавиатуры также не
+входит в ядро.
 
 ```mermaid
 flowchart TB
-    U1["IPC service, ring 3"] <-->|"endpoint capability"| K["microkernel, ring 0"]
-    U2["client, ring 3"] <-->|"SYSCALL + IPC"| K
-    D["keyboard driver, ring 3"] -->|"IRQ1 wait + ports 60h..64h"| K
+    I["user/init"] -->|"SYS_SPAWN + grant list"| K["microkernel"]
+    S["service"] <-->|"queued IPC"| K
+    C["client"] <-->|"process capability"| K
+    D["keyboard driver"] -->|"IRQ1 + ports 60h..64h"| K
     K --> M["PMM / VMM / scheduler"]
     K --> H["PIC / PIT / CPU"]
 ```
 
-## Путь от BIOS до ring 3
+## Загрузка
 
-1. BIOS загружает LBA 0 в `0x7C00`.
+1. BIOS помещает LBA 0 в `0x7C00`.
 2. Первый этап читает 4-KiB продолжение в `0x1000`.
-3. Второй этап включает A20, читает ядро в `0x60000` и получает E820.
-4. В protected mode ядро копируется в физический `0x100000`; строятся PML4,
-   identity map и HHDM.
-5. `CR4.PAE`, `EFER.LME`, `CR0.PG|WP` включаются именно в этом порядке.
-6. 64-битный trampoline загружает GDT/TSS/стек и переходит по адресу
-   `0xFFFF800000100000`.
-7. Ядро инициализирует IDT, PMM/VMM, slab, SYSCALL, создаёт четыре процесса и
-   выходит в ring 3 через искусственный interrupt frame + `IRETQ`.
+3. Real-mode этап включает A20, читает kernel и initramfs во временные DMA
+   buffers ниже 1 MiB и получает карту E820.
+4. Protected-mode этап строит bootstrap PML4, копирует kernel в `0x100000`,
+   initramfs в `0x400000`, GDT/TSS — в зарезервированные страницы.
+5. `CR4.PAE`, `EFER.LME`, `CR0.PG|WP` включаются в архитектурном порядке.
+6. 64-битный trampoline переходит на `0xFFFF800000100000`.
+7. Ядро включает NXE, проверяет initramfs, загружает `init.elf` и выходит в
+   ring 3 через искусственный `Context` и `IRETQ`.
+8. User `init` запускает сервисы, драйвер и тестовые процессы через ABI.
 
-## Диск
+## Raw disk layout
 
-`VOS.VHD` — raw-образ; расширение сохранено исторически.
+`VOS.VHD` — raw image; расширение сохранено исторически.
 
-| LBA | Размер | Содержимое | Адрес загрузки |
-|---:|---:|---|---:|
-| 0 | 512 Б | первый этап и `55 AA` | `0x7C00` |
+| LBA | Размер | Содержимое | Временный/постоянный адрес |
+|---:|---:|---|---|
+| 0 | 512 Б | MBR и `55 AA` | `0x7C00` |
 | 1–8 | 4096 Б | второй этап | `0x1000` |
-| 9–136 | 65536 Б | микроядро | `0x60000`, затем `0x100000` |
+| 9–136 | 65536 Б | микроядро | `0x60000` → `0x100000` |
+| 137–264 | 65536 Б | initramfs | `0x70000` → `0x400000` |
 
-## Физическая память до PMM
+## Физическая и виртуальная память
+
+Bootstrap резервирует:
 
 | Диапазон | Назначение |
 |---|---|
-| `0x000600..0x0009FF` | записи BIOS E820 |
-| `0x001000..0x001FFF` | второй этап и trampoline |
-| `0x002000..0x00FFFF` | стек protected-mode этапа |
-| `0x010000..0x014FFF` | начальные PML4/PDPT/PD |
-| `0x060000..0x06FFFF` | временная копия ядра |
-| `0x100000..0x10FFFF` | ядро |
-| `0x120000..0x2DEFFF` | bootstrap-резерв старой кучи |
-| `0x2DF000` | GDT64 и TSS64 |
-| `0x2E0000..0x2EFFFF` | IST1 |
-| `0x2F0000..0x2FFFFF` | начальный стек ядра |
-| `0x3F0000..0x3F7FFF` | bitmap PMM |
-| `0x500000..` | первые кадры, выдаваемые PMM |
+| `0x000600..0x0009FF` | BIOS E820 |
+| `0x001000..0x001FFF` | stage 2 и trampoline |
+| `0x010000..0x014FFF` | bootstrap page tables |
+| `0x060000..0x07FFFF` | временные kernel/initramfs buffers |
+| `0x100000..0x10FFFF` | kernel image |
+| `0x2DF000` | GDT64/TSS64 |
+| `0x2E0000..0x2FFFFF` | IST1 и bootstrap kernel stack |
+| `0x3F0000..0x3F7FFF` | PMM bitmap |
+| `0x400000..0x40FFFF` | read-only initramfs storage |
+| `0x500000..` | кадры, выдаваемые PMM |
 
-## Виртуальная память
-
-Начальная карта использует 2-MiB страницы:
+Bootstrap PML4 отображает identity и HHDM большими 2-MiB pages. Процесс получает
+новый PML4 с пустой нижней половиной и общей записью `PML4[256]`:
 
 ```text
-PML4[0]   -> identity 0..1 GiB       только bootstrap address space
-PML4[256] -> HHDM + physical address общий supervisor-only direct map
+PML4[0]   -> identity 0..1 GiB          только bootstrap CR3
+PML4[256] -> HHDM + physical address    общий, supervisor-only
 ```
 
-`HHDM.base = 0xFFFF800000000000`, поэтому физический `0x100000` доступен ядру
-как `0xFFFF800000100000`. У каждого процесса свой PML4: нижняя половина
-создаётся заново, а только supervisor-ветвь `PML4[256]` разделяется с ядром.
+`HHDM.base = 0xFFFF800000000000`. U/S не установлен ни на одном HHDM-уровне,
+поэтому ring 3 не может читать ядро даже при наличии этой ветви в CR3. User
+pages используют 4-KiB mappings; executable segments — RX, writable — RW+NX.
 
-В текущем загрузчике:
+## ELF address space
 
-- пользовательский код: `0x400000`, read-only/user;
-- пользовательский стек: `0x7FFFFFFFE000`, read-write/user;
-- page tables и kernel stack каждой задачи выделяются из PMM;
-- `vmm_translate_user` проверяет `P|US` на каждом уровне перед доступом к
-  пользовательскому указателю.
+- ELF images: `0x00010000..0x3FFFFFFF`;
+- heap начинается с выровненного конца последнего `PT_LOAD`;
+- heap ограничен 256 pages;
+- stack top: `0x00007FFFFFF00000`;
+- изначально отображена одна RW+NX page;
+- #PF может добавить только непосредственно соседнюю нижнюю page;
+- максимум stack — 16 pages.
 
-## PMM и slab
+`SYS_BRK` отображает/снимает целые страницы, а точное значение break хранится в
+TCB. Каждый новый кадр обнуляется до user mapping.
 
-PMM сначала считает все кадры занятыми, затем освобождает только полные страницы
-в E820-регионах `type=1`, ограничивая текущую direct map одним GiB. Bitmap имеет
-один бит на кадр 4 KiB.
+## Process lifecycle
 
-Slab allocator делит страницу на классы 32, 64, 128, 256, 512, 1024 и 2048
-байт. В каждом объекте есть 16-байтный header с классом и ссылкой free-list.
-`kmalloc` выбирает минимальный класс, `kfree` возвращает объект. Таблица классов
-создаётся макросом FASM `slab_class`.
+TCB выделяется из slab; глобальная таблица содержит 16 указателей. Process
+token объединяет slot и generation, поэтому capability старого процесса не
+начнёт указывать на новый процесс после reuse.
 
-## Задача и переключение контекста
+```mermaid
+stateDiagram-v2
+    [*] --> RUNNABLE: ELF loaded
+    RUNNABLE --> BLOCKED: recv / wait / IRQ wait
+    BLOCKED --> RUNNABLE: message / child exit / IRQ
+    RUNNABLE --> ZOMBIE: exit or user fault
+    ZOMBIE --> REAPABLE: deferred resource teardown
+    REAPABLE --> [*]: SYS_WAIT frees TCB/slot
+    ZOMBIE --> [*]: an existing waiter receives status
+```
 
-TCB хранит состояние, CR3, сохранённый RSP, вершину kernel stack, IPC mailbox и
-четыре типизированных capability-слота. Состояния: `RUNNABLE`, `BLOCKED_IPC`,
-`BLOCKED_IRQ`, `EXITED`.
+Текущий process нельзя разрушить на его собственном CR3 и kernel stack.
+Поэтому exit сначала создаёт zombie и будит waiter; следующая безопасная задача
+освобождает user frames, все нижние page tables, PML4 и kernel-stack frame.
+После `SYS_WAIT` освобождается TCB и slot становится доступен новому generation.
 
-IRQ и SYSCALL приводятся к одному `Context` размером 160 байт:
+## Context и scheduler
+
+IRQ и SYSCALL используют один `Context` размером 160 байт:
 
 ```text
 r15..r8, rdi, rsi, rbp, rdx, rcx, rbx, rax,
 RIP, CS, RFLAGS, user RSP, user SS
 ```
 
-PIT/IRQ0 сохраняет текущий RSP, выбирает следующую `RUNNABLE` задачу, меняет
-CR3 и TSS.RSP0, затем восстанавливает другой Context через `IRETQ`. Квант —
-10 ms; политика — простой round-robin.
-Если все задачи заблокированы, ядро выполняет `STI; HLT` и повторно ищет
-`RUNNABLE` задачу после IRQ, не расходуя хостовый CPU в пустом цикле.
+PIT/IRQ0 сохраняет kernel RSP в TCB, выбирает следующий `RUNNABLE`, меняет CR3
+и TSS.RSP0 и восстанавливает другой Context через `IRETQ`. Политика — простой
+round-robin, квант 10 ms. Если все процессы заблокированы, ядро выполняет
+`STI; HLT` и просыпается по IRQ.
 
-`SYSCALL` аппаратно не меняет RSP. Entry stub сначала сохраняет user RSP,
-переходит на kernel stack из TCB и вручную строит тот же Context. IF/DF
-сбрасываются через `IA32_FMASK`; возврат намеренно делается безопасным `IRETQ`.
+## Capabilities
 
-## IPC и capabilities
-
-Handle локален процессу. Slot содержит `type`, `object`, `rights`; нулевой
-handle всегда недействителен. Реализованы типы:
+Handle локален процессу; ноль всегда недействителен. В каждом из 16 slots лежат
+`type`, `object`, `rights`.
 
 | Тип | Object | Права |
 |---|---|---|
-| endpoint | `task_index + 1` | `CAP_SEND` |
-| I/O ports | `length:32 | base:16` | `CAP_READ`, `CAP_WRITE` |
-| IRQ | `irq + 1` | `CAP_WAIT` |
+| process | generation-safe token | `SEND`, `WAIT` |
+| I/O ports | `length:32 | base:16` | `READ`, `WRITE` |
+| IRQ | `irq+1` | `WAIT` |
+| system | kernel object | `SPAWN` |
 
-`SYS_SEND` не принимает PID. Если получатель ждёт, значение сразу записывается
-в его сохранённый Context; иначе используется mailbox глубиной один.
+`SYS_SPAWN` принимает до четырёх `{handle, rights}`. Права ребёнка обязаны быть
+подмножеством прав родителя. Process/I/O capabilities копируются; уникальная
+IRQ capability после успешного spawn атомарно перемещается ребёнку.
 
-## Исключения
+## IPC
 
-32 stubs генерируются макросом `exception_stub`, который учитывает наличие
-аппаратного error code. Исключение ring 0 печатает диагностику и останавливает
-CPU. Исключение ring 3 завершает только текущую задачу и запускает следующую.
-Double fault использует IST1.
+`SYS_SEND` принимает process capability с `CAP_SEND`, а не PID/token. У каждого
+получателя кольцевая очередь на восемь `{sender_token, value}`. Если получатель
+уже заблокирован в `SYS_RECV`, ядро записывает результат прямо в его сохранённый
+Context. Полная очередь возвращает `-11`, реализуя явный backpressure.
 
-## Драйверные IRQ
+Sender token в `RDX` — только идентификатор события, не полномочие. Для ответа
+процесс должен заранее получить отдельную capability.
 
-IRQ1 имеет one-shot семантику: stub немедленно маскирует линию, сохраняет event
-и посылает EOI. После обработки `SYS_IRQ_WAIT` вновь открывает ровно следующее
-событие. Это не позволяет неисправному устройству создать бесконечный interrupt
-storm до того, как user-драйвер подтвердил готовность.
+## Исключения и teardown
+
+32 stubs генерируются `exception_stub`; наличие CPU error code нормализуется.
+Ring-0 fault печатает vector/error/RIP и останавливает CPU. Ring-3 fault даёт
+exit status `128+vector`. Исключение #PF сначала проверяется как допустимый рост
+стека; остальные page faults завершают только виновный процесс.

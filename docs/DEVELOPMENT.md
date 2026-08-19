@@ -28,16 +28,25 @@ make clean && make test
 
 Проверяются:
 
-1. сборка boot/kernel/raw image;
-2. размеры, `55 AA`, точная конкатенация и SHA-256 FASM;
-3. реальная загрузка `qemu-system-x86_64` в TCG;
-4. инициализация ring-3 keyboard-driver;
-5. локализация намеренного `UD2` в user task;
-6. блокирующий IPC `PING/PONG` между разными CR3;
-7. маркер `VARANIA:MICROKERNEL_OK`.
+1. сборка boot/kernel, семи user ELF, initramfs и raw image;
+2. `55 AA`, размеры, точная конкатенация и SHA-256 FASM;
+3. каждый ELF header/program header, file bounds, W^X и page overlap;
+4. многостраничные RX/RW segments `memory_test.elf`;
+5. реальная загрузка `qemu-system-x86_64` в TCG;
+6. user/init, четыре сообщения IPC и ring-3 keyboard IRQ через QMP;
+7. BSS, heap shrink/regrow, demand-growth stack и HHDM isolation;
+8. create/exit/wait, deferred teardown, возврат frames и slot reuse.
 
-TCG одинаково работает на Mac ARM и Linux и не требует KVM/HVF. Smoke-test
-сам завершает QEMU по таймауту 10 секунд.
+Тесты можно запускать отдельно:
+
+```bash
+make smoke
+make test-isolation
+make test-lifecycle
+```
+
+TCG одинаково работает на Mac ARM и Linux и не требует KVM/HVF. Каждый
+headless-тест ограничен таймаутом и сам завершает QEMU.
 
 ## Интерактивный запуск
 
@@ -64,8 +73,9 @@ make debug
 - `Triple fault` до вывода banner — ошибка GDT/paging/trampoline;
 - #PF с RSVD — неверный флаг или выравнивание page-table entry;
 - kernel `CPU EXCEPTION` — fault с CPL0;
-- `terminated user task` — корректно локализованный fault CPL3;
+- `terminated user task ... 0E` — ожидаемый #PF isolation test;
 - нет `MICROKERNEL_OK` — проверить Context offsets, CR3, IPC и capabilities;
+- нет `LIFECYCLE_OK` — проверить deferred teardown и `pmm_free_count`;
 - IRQ storm — проверить one-shot mask/unmask и сброс состояния устройства.
 
 ## Правила кода
@@ -75,8 +85,11 @@ make debug
 - callee сохраняет `RBX`, `RBP`, `R12..R15`;
 - физическая память разыменовывается только через `HHDM.base`;
 - user pointer нельзя читать до `vmm_translate_user`;
+- новый user frame должен быть обнулён до установки mapping;
 - capability всегда проверяется по handle, type и rights;
+- process object хранит token с generation, не голый slot;
 - у IRQ и SYSCALL должен оставаться единый `Context`;
+- текущий CR3/kernel stack нельзя освобождать на exit path;
 - комментарии объясняют причину и инвариант, а не повторяют mnemonic.
 
 ## Изменение карты памяти
@@ -87,8 +100,16 @@ make debug
 4. Обновить `docs/ARCHITECTURE.md`.
 5. Выполнить `make clean && make test`.
 
-Образ ядра фиксирован на 64 KiB, IDT начинается со смещения `0xF000`. FASM
-останавливает сборку при наложении кода на IDT.
+Образ ядра и initramfs фиксированы на 64 KiB каждый. IDT начинается в kernel со
+смещения `0xF000`; FASM останавливает сборку при наложении кода на IDT.
+
+## Изменение user ABI
+
+1. Добавить одинаковый номер в `src/user/abi.inc` и `amd64/syscall.inc`.
+2. Считать аргументы только из сохранённого `Context`.
+3. Перевести каждый user pointer через `vmm_translate_user` или helper copy.
+4. Документировать blocking semantics, consumption capabilities и errno.
+5. Добавить user ELF, который проверяет normal и error path в QEMU.
 
 ## CI
 

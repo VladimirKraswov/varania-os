@@ -80,6 +80,15 @@ KERNEL.size        = 65536    ;// Размер ядра в байтах (128 с�
 KERNEL.sectors     = KERNEL.size/512
 KERNEL.firstSector = BOOT2.firstSector+(BOOT2.size/512) ;// LBA первого сектора ядра
 
+;//// Initramfs загружается BIOS во временный буфер, а protected-mode этап
+;//// переносит его выше первого MiB. Фиксированный размер упрощает учебный
+;//// загрузчик: формат архива всё равно содержит фактический total_size.
+INITRAMFS.tempBase    = 0x70000
+INITRAMFS.physBase    = 0x400000
+INITRAMFS.size        = 65536
+INITRAMFS.sectors     = INITRAMFS.size/512
+INITRAMFS.firstSector = KERNEL.firstSector+KERNEL.sectors
+
 ;//// HHDM начинается с PML4[256] и линейно отображает физические 0..1 GiB.
 ;//// Код ядра лежит по HHDM+физический KERNEL.physBase.
 ;//// Ограничение FASM 1.73: hex-литералы выше 0x9FFFFFFFFFFFFFFF парсер
@@ -108,6 +117,7 @@ PAGE.P  = 1        ;// Present - страница в памяти
 PAGE.RW = 2        ;// Read/Write - чтение/запись
 PAGE.US = 4        ;// User - доступна из пользовательского режима
 PAGE.PS = 0x80     ;// Page Size - большая страница (2 MiB)
+PAGE.NX = 1 shl 63 ;// No Execute, действует после включения EFER.NXE
 
 ;//// Селекторы сегментов 64-битной GDT. TSS занимает 16 байт.
 SEL.null   = 0x00 ;// Нулевой (пустой) дескриптор

@@ -1,40 +1,42 @@
 # Varania OS: учебное микроядро amd64
 
-Varania OS — небольшая операционная система на Flat Assembler, показывающая весь
-путь от BIOS-сектора до изолированных 64-битных процессов. Проект начинался в
-2019 году как монолитное 32-битное ядро; текущая активная версия — однопроцессорное
-микроядро amd64 с пользовательскими сервисами и capability-based IPC.
+Varania OS — небольшая 64-битная операционная система на Flat Assembler. Она
+показывает полный путь от BIOS boot sector до изолированных ELF64-процессов,
+которые создаёт пользовательский `init`. Проект начинался в 2019 году как
+монолитное 32-битное ядро; активная версия — однопроцессорное capability-based
+микроядро amd64.
 
-Главная цель проекта — читаемость. Активный код подробно прокомментирован на
-русском, функции используют System V AMD64 ABI, а макросы FASM `function/endf`,
-`leaf_function/end_leaf` и генераторы таблиц убирают механическое повторение,
-не скрывая работу процессора.
+Главная цель — читаемость. Активный код подробно прокомментирован на русском,
+функции следуют System V AMD64 ABI, а небольшие макросы FASM убирают рутинные
+прологи и генерацию однотипных таблиц, не скрывая работу CPU и page tables.
 
-## Что работает
+## Что уже работает
 
-- собственный BIOS-загрузчик: `real mode → protected mode → long mode`;
-- PAE, четырёхуровневый paging и supervisor-only HHDM для физической памяти;
-- GDT с ring 0/ring 3, TSS64, отдельный IST1 для double fault и IDT64;
-- PMM по карте BIOS E820 и slab allocator `kmalloc/kfree`;
-- отдельный PML4, user stack и kernel stack у каждой задачи;
-- вытесняющий round-robin планировщик с квантом 10 ms;
-- быстрый вход `SYSCALL`, единый формат контекста для syscall/IRQ;
-- блокирующий IPC и типизированные capabilities вместо глобальных PID;
-- локализация user-mode исключений: ошибочный сервис завершается, ядро и
-  остальные процессы продолжают работу;
-- capabilities на IRQ и диапазоны I/O-портов для драйверов в user space;
-- ring-3 keyboard-service, ожидающий IRQ1 и читающий только порты `0x60..0x64`;
-- воспроизводимая сборка и headless-тест в QEMU на Mac Apple Silicon и Linux.
+- BIOS loader: `real mode → protected mode → long mode`;
+- PAE, четырёхуровневый paging, CR0.WP, EFER.NXE и supervisor-only HHDM;
+- GDT ring 0/ring 3, TSS64, IST1 для double fault и IDT64;
+- PMM по BIOS E820, slab allocator и полное освобождение process frames;
+- initramfs с детерминированной таблицей файлов;
+- строгий загрузчик `ELF64 ET_EXEC`: `PT_LOAD`, BSS, W^X, RX/RW/NX;
+- до 16 динамических процессов с generation-safe process capabilities;
+- многостраничные code/data, heap через `SYS_BRK` и растущий user stack;
+- вытесняющий round-robin с квантом 10 ms и общий `Context` для IRQ/SYSCALL;
+- `SYS_SPAWN`, передача/ослабление capabilities, `SYS_WAIT` и exit status;
+- IPC-очередь из восьми сообщений и прямая доставка спящему получателю;
+- локализация user faults: неисправный процесс завершается, ядро продолжает;
+- ring-3 PS/2 keyboard driver с capabilities только на IRQ1 и `0x60..0x64`;
+- отдельные QEMU-тесты memory isolation и полного process lifecycle;
+- воспроизводимая сборка на macOS Apple Silicon и Linux x86_64.
 
-При успешной загрузке клиент и сервис обмениваются `PING/PONG`, после чего
-появляется контрольная строка:
+Успешный интеграционный запуск заканчивается маркерами:
 
 ```text
+VARANIA:IPC_QUEUE_OK
+VARANIA:MEMORY_OK
+VARANIA:ISOLATION_OK
+VARANIA:LIFECYCLE_OK
 VARANIA:MICROKERNEL_OK
 ```
-
-Отдельная тестовая задача выполняет `UD2`; сообщение о её завершении доказывает,
-что исключение ring 3 не превратилось в kernel panic.
 
 ## Быстрый старт
 
@@ -48,8 +50,8 @@ make test
 make run
 ```
 
-FASM из Homebrew не нужен. Зафиксированный официальный FASM 1.73.35 запускается
-в локальном `linux/amd64`-контейнере. Сборка не устанавливает файлы в систему.
+FASM из Homebrew не нужен. Зафиксированный FASM 1.73.35 выполняется в локальном
+`linux/amd64`-контейнере; сборка ничего не устанавливает в систему.
 
 ### Linux x86_64 (Debian/Ubuntu)
 
@@ -60,46 +62,72 @@ make test
 make run
 ```
 
-На Linux официальный статический FASM запускается прямо из архива репозитория;
+На Linux официальный статический FASM запускается прямо из архива репозитория,
 Docker не требуется.
 
 ## Команды
 
 | Команда | Назначение |
 |---|---|
-| `make build` | собрать `BOOT.BIN`, `KERNEL.BIN`, `VOS.VHD` |
-| `make check` | проверить boot signature, размеры, хеш FASM и raw-образ |
-| `make test` | выполнить `check` и загрузить ОС в headless QEMU/TCG |
-| `make run` | открыть VGA-окно QEMU; клавиатуру обслуживает ring-3 драйвер |
-| `make debug` | записать события CPU в `qemu-debug.log` |
-| `make clean` | удалить только результаты сборки и журнал QEMU |
+| `make build` | собрать boot, kernel, user ELF, initramfs и raw image |
+| `make check` | проверить образ, initramfs и каждый ELF/PT_LOAD |
+| `make smoke` | проверить полный сценарий и IRQ1 через QMP |
+| `make test-isolation` | отдельно проверить code/data/heap/stack и HHDM isolation |
+| `make test-lifecycle` | отдельно проверить create/exit/wait/teardown/slot reuse |
+| `make test` | выполнить все статические и QEMU-тесты |
+| `make run` | открыть VGA-окно QEMU |
+| `make debug` | записать CPU/interrupt log в `qemu-debug.log` |
+| `make clean` | удалить только результаты сборки |
 
-Совместимая оболочка старого проекта также сохранена: `./c.sh build|test|run`.
+Совместимая оболочка старого проекта сохранена: `./c.sh build|test|run`.
+
+## Как запускается user space
+
+```mermaid
+flowchart LR
+    B["BIOS loader"] --> K["microkernel"]
+    K --> R["read-only initramfs"]
+    R --> E["ELF64 loader"]
+    E --> I["user/init"]
+    I --> S["IPC service"]
+    I --> C["client"]
+    I --> D["keyboard driver"]
+    I --> T["memory/lifecycle tests"]
+```
+
+Ядро bootstrap-ит только `init.elf` и выдаёт ему system, IRQ1 и I/O-port
+capabilities. Все остальные программы запускает сам `init` через `SYS_SPAWN`.
+Клиент получает endpoint сервиса, а keyboard driver — IRQ и I/O range. Имена
+процессов не являются полномочиями: после создания взаимодействие идёт только
+через локальные capability handles.
 
 ## Дерево активного кода
 
 ```text
-src/boot/boot.asm             загрузка, E820, paging, вход в long mode
-src/const.inc                 единая физическая/виртуальная карта
-src/kernel/kernel.asm         композиция ядра и встроенные user-сервисы
-src/kernel/amd64/macros.inc   читаемый FASM DSL и interrupt helpers
-src/kernel/amd64/pmm.inc      физические кадры
-src/kernel/amd64/memory.inc   адресные пространства и user-pointer validation
-src/kernel/amd64/slab.inc     kmalloc/kfree
-src/kernel/amd64/task.inc     TCB, ring 3 и планировщик
-src/kernel/amd64/ipc.inc      endpoint capabilities и IPC
-src/kernel/amd64/device.inc   IRQ/I/O capabilities для драйверов
-src/kernel/amd64/syscall.inc  SYSCALL ABI
-tests/                        формат образа и настоящий QEMU smoke-test
-tools/fasm/                   воспроизводимый FASM 1.73.35
+src/boot/boot.asm               BIOS, E820, paging, long mode, initramfs copy
+src/const.inc                   физическая и виртуальная карта памяти
+src/kernel/kernel.asm           композиция и bootstrap user/init
+src/kernel/amd64/initramfs.inc  проверка архива и поиск файла
+src/kernel/amd64/elf.inc        ELF64/PT_LOAD/BSS/W^X loader
+src/kernel/amd64/memory.inc     address spaces, map/unmap/teardown
+src/kernel/amd64/task.inc       process lifecycle, scheduler, capabilities
+src/kernel/amd64/ipc.inc        кольцевые очереди IPC
+src/kernel/amd64/device.inc     IRQ/I/O capabilities
+src/kernel/amd64/syscall.inc    user ABI и безопасное копирование
+src/user/init.asm               пользовательский process manager/bootstrap
+src/user/*.asm                  сервисы, драйвер и тестовые процессы
+scripts/mkinitramfs.py          детерминированная упаковка user ELF
+tests/                          structural и headless QEMU tests
+tools/fasm/                     воспроизводимый FASM 1.73.35
 ```
 
 Исторический 32-битный код оставлен в `src/kernel/` для сравнения, но не входит
-в образ.
+в активный образ.
 
 ## Документация
 
 - [Архитектура и доверенная граница](docs/ARCHITECTURE.md)
+- [User space, initramfs и ELF64](docs/USERSPACE.md)
 - [ABI системных вызовов](docs/SYSCALLS.md)
 - [Драйверы в пользовательском пространстве](docs/DRIVERS.md)
 - [Сборка, тестирование и отладка](docs/DEVELOPMENT.md)
@@ -107,17 +135,17 @@ tools/fasm/                   воспроизводимый FASM 1.73.35
 
 ## Честные ограничения
 
-Это уже рабочее микроядро, но ещё не ОС общего назначения:
+Это рабочее учебное микроядро, но не production-ОС:
 
-- один CPU, legacy BIOS/PIC/PIT; нет UEFI, APIC, SMP и ACPI;
-- максимум четыре встроенные задачи, программа и стек пока по одной странице;
-- нет ELF-loader, файловой системы, init-сервера и постоянного хранилища;
-- IPC несёт одно 64-битное значение и имеет очередь глубиной один;
-- освобождение завершившегося address space и возврат полностью пустых slab-ов
-  ещё не реализованы;
-- IRQ-маршрутизация показана для PS/2 IRQ1; MMIO, DMA/IOMMU и MSI отсутствуют;
-- NX/W^X, ASLR, SMEP/SMAP и полноценная модель отзыва capabilities — следующие
-  этапы усиления безопасности.
+- один CPU, legacy BIOS/PIC/PIT; пока нет UEFI, APIC, SMP и ACPI;
+- максимум 16 process slots, initramfs фиксирован на 64 KiB;
+- ELF loader поддерживает статические `ET_EXEC`, но не PIE, relocations и dynamic linking;
+- user stack ограничен 16 страницами, heap — 256 страницами на процесс;
+- IPC переносит два машинных слова метаданных, но пока не shared memory/large payload;
+- нет VFS, постоянного хранилища, сети, POSIX и системного C ABI/runtime;
+- IRQ/I/O показаны на PS/2; для MMIO/DMA нужны новые объекты и IOMMU;
+- slab повторно использует объекты, но ещё не возвращает полностью пустые slab pages PMM;
+- нет SMP-locking, ASLR, SMEP/SMAP и полноценного отзыва всех копий capability.
 
-Ограничения перечислены явно, чтобы учебное ядро не создавало ложного ощущения
-готовой production-системы.
+Ограничения перечислены явно: следующие этапы можно добавлять поверх уже
+проверяемых механизмов, не маскируя учебную реализацию под готовую систему.

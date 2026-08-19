@@ -17,6 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 IMAGE = ROOT / "VOS.VHD"
 MARKER = b"VARANIA:MICROKERNEL_OK"
 FAULT_MARKER = b"terminated user task"
+IPC_QUEUE_MARKER = b"VARANIA:IPC_QUEUE_OK"
+MEMORY_MARKER = b"VARANIA:MEMORY_OK"
 DRIVER_MARKER = b"keyboard-driver: waiting for IRQ1"
 DRIVER_IRQ_MARKER = b"keyboard-driver: IRQ1 handled"
 
@@ -114,13 +116,19 @@ def main() -> None:
     if FAULT_MARKER not in output:
         print("ОШИБКА: не проверена локализация user-mode исключения", file=sys.stderr)
         raise SystemExit(1)
+    if IPC_QUEUE_MARKER not in output:
+        print("ОШИБКА: не проверена кольцевая очередь IPC", file=sys.stderr)
+        raise SystemExit(1)
+    if MEMORY_MARKER not in output:
+        print("ОШИБКА: не пройден multi-page memory test", file=sys.stderr)
+        raise SystemExit(1)
     if DRIVER_MARKER not in output:
         print("ОШИБКА: ring-3 драйвер не дошёл до ожидания IRQ", file=sys.stderr)
         raise SystemExit(1)
     if DRIVER_IRQ_MARKER not in output:
         print("ОШИБКА: IRQ1 не дошёл до ring-3 драйвера", file=sys.stderr)
         raise SystemExit(1)
-    print("Smoke-тест QEMU пройден: IPC, fault isolation и ring-3 IRQ-драйвер работают.")
+    print("Smoke-тест QEMU пройден: ELF init, queued IPC, memory и ring-3 IRQ работают.")
 
 
 if __name__ == "__main__":

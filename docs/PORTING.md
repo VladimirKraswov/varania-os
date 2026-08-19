@@ -32,16 +32,18 @@
 | процессы | код ring 0 в mapped page | отдельные PML4 и ring 3 |
 | syscall | `int 0x30` с raw pointer | `SYSCALL` + validation |
 | планирование | только PIT ticks | preemptive round-robin |
-| IPC | отсутствовал | blocking capability IPC |
+| IPC | отсутствовал | capability IPC, очередь 8 сообщений |
 | heap | bump allocator | PMM + slab `kmalloc/kfree` |
 | драйвер PS/2 | ring 0 | ring 3 + IRQ/I/O caps |
 | user fault | останавливал ядро | завершает один процесс |
+| программы | встроенные flat blobs | ELF64 из initramfs, user/init |
+| lifecycle | фиксированные задачи | spawn/wait, generations, teardown |
 
 Identity map оставлена только в bootstrap PML4. Пользовательские PML4 получают
 свою нижнюю половину и общую supervisor-only HHDM branch. GDT также
 перезагружается HHDM-адресом перед первым переключением CR3.
 
-## Ошибка, найденная новым fault-test
+## Ошибка, найденная первым fault-test
 
 Старые stubs были записаны как:
 
@@ -52,7 +54,20 @@ exception_6: push 0; push 6; jmp exception_common
 В FASM `;` начинает комментарий, поэтому собирался только `push 0`, а выполнение
 проваливалось через последующие labels. Ошибка долго была скрыта, потому что
 smoke-test не вызывал CPU exception. Теперь 32 stubs генерируются проверяемым
-макросом `exception_stub`, а отдельная ring-3 задача всегда выполняет `UD2`.
+макросом `exception_stub`, а `isolation_test.elf` гарантированно вызывает #PF
+при чтении supervisor HHDM.
+
+## От встроенных blobs к ELF/init
+
+Промежуточное микроядро создавало четыре задачи прямо из labels в
+`kernel.asm`. Это доказывало ring 3, но смешивало kernel mechanism и boot policy.
+Новый этап добавил отдельный raw initramfs, строгий ELF64 loader и system
+capability. Ядро теперь знает только `init.elf`; состав сервисов определяет
+user/init.
+
+Переход потребовал не только парсера ELF, но и полного lifecycle: частичная
+ошибка загрузки обязана откатить frames, exit нельзя разрушать на текущем стеке,
+а reuse slot-а требует generation, иначе старая capability создаёт ABA-уязвимость.
 
 ## Почему не выполнен механический перевод
 

@@ -69,6 +69,7 @@ sector_low_id    dd 0
 
 macro disk.load_sectors disk_id, sec_h_id, sec_l_id, sec_count, buff_addr
 {
+  local .read_next, .carry_done
   pushad
   push dword sec_h_id 
   push dword sec_l_id
@@ -77,7 +78,7 @@ macro disk.load_sectors disk_id, sec_h_id, sec_l_id, sec_count, buff_addr
   
   mov edi,buff_addr
   mov ecx,sec_count
-  @@:
+  .read_next:
     ;// Перевод линейного адреса в адрес формата Сегмент:Смещение
     mov eax, edi ;// Линейный адрес
     xor edx, edx
@@ -89,14 +90,14 @@ macro disk.load_sectors disk_id, sec_h_id, sec_l_id, sec_count, buff_addr
     
     ;// Переход к следующему сектору
     cmp [sector_low_id], 0xFFFFFFFF
-    jnz .next
+    jnz .carry_done
     inc [sector_height_id]
-    .next:
+    .carry_done:
       inc [sector_low_id]
       
     ;// Переход к следующей области памяти
     add edi, 512
-    loop @b
+    loop .read_next
   popad
 }
 
