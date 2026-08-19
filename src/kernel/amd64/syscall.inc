@@ -29,6 +29,7 @@ SYS_PROCESS_KILL    = 24
 SYS_SHARED_CREATE   = 25
 SYS_SHARED_MAP      = 26
 SYS_CAP_REVOKE      = 27
+SYS_MMIO_MAP        = 28
 
 ERR_NOENT = -2
 ERR_BAD_HANDLE = -9
@@ -59,7 +60,8 @@ SPACE_MAP_EXEC  = 2
 
 syscall_user_rsp dq 0
 
-;// Вывести не более 256 байт из user-памяти.
+;// Вывести не более 256 байт в диагностический порт. VGA после bootstrap
+;// принадлежит user-space console driver и не должен изменяться SYS_LOG.
 function syscall_log
   push rbx
   push r12
@@ -88,7 +90,7 @@ function syscall_log
     jz .fault
     hhdm_address rdx, rax
     movzx edi, byte [rdx]
-    call print_char
+    call debug_put_char
     inc r12
     dec r13
     jmp .next_byte
@@ -564,6 +566,69 @@ function syscall_shared_map
   pop rbx
 endf
 
+;// Отобразить одну страницу device MMIO в текущий процесс.
+;// Физический адрес никогда не приходит от user space: он уже заключён в
+;// CAP_MMIO, выданную bootstrap/device policy. RDI=cap, RSI=user virtual.
+function syscall_mmio_map
+  push rbx
+  push r12
+  push r13
+  push r14
+  mov r12, rsi
+  test r12, PAGE_SIZE-1
+  jnz .invalid
+  cmp r12, USER.imageMin
+  jb .invalid
+  mov rax, USER.limit-PAGE_SIZE
+  cmp r12, rax
+  ja .invalid
+  mov esi, CAP_MMIO
+  ;// x86-64 не умеет write-only PTE: RW mapping неизбежно доступен для чтения.
+  ;// Поэтому capability честно обязана содержать READ, WRITE и MAP.
+  mov edx, CAP_MAP+CAP_READ+CAP_WRITE
+  call capability_lookup
+  test rax, rax
+  jz .bad
+  mov r13, rax                     ;// доверенный физический адрес страницы
+  test r13, PAGE_SIZE-1
+  jnz .invalid
+  mov edi, [current_task]
+  call task_by_index
+  mov rbx, [rax+Task.space]
+  test rbx, rbx
+  jz .invalid
+  mov rdi, [rbx+AddressSpace.cr3]
+  mov rsi, r12
+  call vmm_translate_user
+  test rax, rax
+  jnz .busy
+  mov rdi, [rbx+AddressSpace.cr3]
+  mov rsi, r12
+  mov rdx, r13
+  mov rcx, PAGE.US+PAGE.RW+PAGE.NX+PAGE.BORROWED
+  call vmm_map_in_space
+  test rax, rax
+  jz .no_memory
+  xor eax, eax
+  jmp .done
+  .bad:
+  mov rax, ERR_BAD_HANDLE
+  jmp .done
+  .busy:
+  mov rax, ERR_BUSY
+  jmp .done
+  .no_memory:
+  mov rax, ERR_NO_MEMORY
+  jmp .done
+  .invalid:
+  mov rax, ERR_INVALID
+  .done:
+  pop r14
+  pop r13
+  pop r12
+  pop rbx
+endf
+
 ;// Создать suspended thread в уже подготовленном address space.
 ;// RDI=system cap, RSI=space cap, RDX=user ThreadConfig*. RAX=process handle.
 function syscall_thread_create
@@ -827,6 +892,8 @@ function syscall_dispatch
   je .shared_map
   cmp rax, SYS_CAP_REVOKE
   je .cap_revoke
+  cmp rax, SYS_MMIO_MAP
+  je .mmio_map
   mov qword [r12+Context.rax], ERR_NOSYS
   jmp .resume_current
 
@@ -960,6 +1027,13 @@ function syscall_dispatch
   .cap_revoke:
   mov rdi, [r12+Context.rdi]
   call capability_revoke_current
+  mov [r12+Context.rax], rax
+  jmp .resume_current
+
+  .mmio_map:
+  mov rdi, [r12+Context.rdi]
+  mov rsi, [r12+Context.rsi]
+  call syscall_mmio_map
   mov [r12+Context.rax], rax
   jmp .resume_current
 

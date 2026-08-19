@@ -2,78 +2,96 @@
 
 ## Модель
 
-Драйвер — обычная ring-3 задача. При создании доверенный init/loader должен:
+Драйвер Varania OS — обычная изолированная ring-3 задача. Ядро предоставляет
+механизм доступа к устройству, но не реализует раскладку клавиатуры, terminal,
+filesystem protocol или shell policy. При создании драйвера `procd`:
 
-1. создать изолированное address space;
-2. выдать endpoint для общения с другими сервисами;
-3. выдать capability конкретного IRQ;
-4. выдать минимальный диапазон I/O-портов с нужными правами;
-5. запустить задачу без IOPL и без доступа к HHDM.
+1. создаёт отдельное address space и inbox endpoint;
+2. передаёт SEND-capability nameserver;
+3. добавляет только разрешённые bootstrap policy device capabilities;
+4. запускает процесс без IOPL и без user-доступа к HHDM.
 
-Kernel выдаёт IRQ/I/O capabilities только bootstrap-процессу `procd`. По
-запросу init user loader создаёт `keyboard.elf` через low-level object ABI и
-передаёт ему:
+Init сам не владеет hardware handles. Он просит запустить ELF по имени, а
+точечная policy procd не позволяет выдать VGA capability произвольной программе.
+
+## Keyboard driver
+
+`keyboard.elf` получает handles в фиксированном порядке:
 
 | Handle | Тип | Объект | Права |
 |---:|---|---|---|
-| 1 | Endpoint | inbox | send + receive |
-| 2 | IRQ | IRQ1 | wait |
-| 3 | I/O ports | `0x60..0x64` | read |
+| 1 | Endpoint | inbox | `SEND|RECV` |
+| 2 | Endpoint | nameserver | `SEND` |
+| 3 | IRQ | IRQ1 | `WAIT` |
+| 4 | I/O ports | `0x60..0x64` | `READ` |
 
 IRQ capability имеет уникальную move-семантику при `THREAD_CREATE`: после
 успешного commit handle удаляется у procd, а IRQ router указывает на token
-драйвера. I/O capability в текущей модели можно копировать с attenuation.
+драйвера. I/O capability копируется с attenuation.
 
-## Цикл PS/2-драйвера
+Driver ждёт IRQ1, читает scan code из `0x60`, игнорирует release/non-character
+события и переводит set 1 в простой lowercase ASCII. Endpoint terminal он
+получает через nameserver и отправляет `TERM_KEY`. Таким образом keyboard не
+может рисовать на экране, а terminal не может читать PS/2 ports.
 
-```asm
-.wait:
-  mov eax, SYS_IRQ_WAIT
-  mov edi, 2
-  syscall
+Текущая таблица намеренно мала: цифры, латинские строчные буквы, основные
+знаки, Space, Enter и Backspace. Shift/Ctrl/Alt, compose, Unicode и несколько
+layouts должны появиться отдельным input service слоем.
 
-  mov eax, SYS_IO_READ8
-  mov edi, 3
-  xor esi, esi              ; base + 0 = 0x60
-  syscall
-  ; RAX содержит scan code
-  jmp .wait
+## VGA terminal driver
+
+`terminal.elf` получает:
+
+| Handle | Тип | Объект | Права |
+|---:|---|---|---|
+| 1 | Endpoint | inbox | `SEND|RECV` |
+| 2 | Endpoint | nameserver | `SEND` |
+| 3 | MMIO | VGA text page `0xB8000` | `MAP|READ|WRITE` |
+
+`SYS_MMIO_MAP` отображает страницу в `0x50000000` как `RW|NX`. Физический
+адрес заключён в capability, поэтому driver выбирает только свободный virtual
+address. Mapping помечен `PAGE.BORROWED`: при завершении terminal page tables
+освобождаются, но device memory не возвращается PMM.
+
+Terminal реализует 80×25 cells, scrolling, cursor в памяти, очистку, echo,
+backspace и сбор одной строки. Hardware VGA cursor ports пока не нужны. После
+старта `SYS_LOG` остаётся только debugcon-интерфейсом: kernel diagnostics не
+портят пользовательский экран.
+
+```mermaid
+flowchart LR
+    P["PS/2 ports + IRQ1"] --> K["keyboard.elf"]
+    K -->|"ASCII / TERM_KEY"| T["terminal.elf"]
+    S["shell.elf"] -->|"WRITE / READLINE / CLEAR"| T
+    T -->|"MMIO mapping"| V["VGA text page"]
 ```
-
-IRQ маскируется stub-ом и открывается следующим `SYS_IRQ_WAIT`. Поэтому драйвер
-сначала читает/сбрасывает состояние устройства и лишь затем подтверждает
-готовность принять следующее событие.
 
 ## Как добавить ещё один legacy-драйвер
 
-1. Добавить IRQ stub и IDT gate по образцу `irq_1`.
-2. В stub вызвать `pic_mask_irq`, `device_irq_notify`, `pic_send_eoi`.
-3. Увеличить/настроить таблицу маршрутизации, если IRQ ещё не представлен.
-4. Создать отдельный `src/user/name.asm` как ELF64 и добавить его в initramfs.
-5. Выдать IRQ/I/O capabilities init один раз при bootstrap или через будущий
-   device manager.
-6. Передать capabilities в `ThreadConfig.grants` user-space loader-а.
-7. Передать endpoint нужного сервиса, а не process capability.
-8. Добавить QEMU-тест нормального события и тест отказа в чужом порту.
+1. Добавить IRQ stub/IDT gate по образцу `irq_1`, если линия ещё не маршрутизируется.
+2. В stub вызвать mask, `device_irq_notify`, EOI; unmask делает следующий wait.
+3. Создать отдельный `src/user/name.asm` и добавить ELF в initramfs.
+4. В bootstrap policy определить минимальные IRQ/I/O/MMIO capabilities.
+5. Передать сервисные endpoints, а не process capabilities.
+6. Зарегистрировать публичный endpoint через nameserver.
+7. Добавить тест нормального события, отказа в чужом ресурсе и teardown.
 
-Supervisor может завершить зависший драйвер по process capability с `CONTROL`.
-Перед рестартом он должен также вызвать `CAP_REVOKE` на сохранённых корнях
-делегирования: queued сообщения с отозванными правами будут отменены, а новый
-экземпляр получит свежие attenuated descendants. Для IRQ router текущая
-bootstrap policy всё ещё уникальна и потребует отдельного device manager перед
-полноценным автоматическим перезапуском hardware driver.
+Supervisor может завершить зависший драйвер по capability с `CONTROL`. Перед
+рестартом он должен отозвать descendants сохранённых корней делегирования.
+Полноценный рестарт hardware driver потребует device manager, который заново
+маршрутизирует уникальный IRQ и выдаёт свежие handles.
 
-## Что потребуется для PCI/MMIO
+## PCI, MMIO и DMA
 
-Нельзя просто переиспользовать port I/O capability. Следующий слой должен
-добавить отдельные типы объектов:
+Текущий MMIO тип ограничен одной заранее известной page и подходит для VGA.
+Для PCI устройств нужны дополнительные объекты и policy:
 
 - read-only PCI configuration capability;
-- MMIO range с отображением только в address space драйвера;
-- DMA buffer и, на реальном железе, IOMMU domain;
-- MSI/MSI-X interrupt object;
-- отзыв capability при завершении/перезапуске драйвера.
+- MMIO range с длиной, cache attributes и отображением только driver-у;
+- DMA buffers и IOMMU domain;
+- MSI/MSI-X interrupt objects;
+- revoke/unmap при завершении или рестарте драйвера.
 
-До появления IOMMU драйвер с bus-master DMA не является полностью изолированным:
-устройство способно записывать физическую память вне page tables CPU. Это
-важное ограничение безопасности, а не деталь реализации.
+До появления IOMMU driver устройства с bus-master DMA не полностью изолирован:
+само устройство способно записывать физическую память вне CPU page tables. Это
+граница безопасности, а не деталь будущего API.

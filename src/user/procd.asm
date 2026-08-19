@@ -11,6 +11,7 @@ CONTROL_EP  = 2
 BOOTFS_CAP  = 3
 IRQ1_CAP    = 4
 IO_CAP      = 5
+VGA_CAP     = 6
 
 ELF_HEADER_SIZE = 64
 ELF_PH_SIZE     = 56
@@ -43,6 +44,8 @@ start:
   mov ecx, CAP_SEND
   xor r8d, r8d
   xor r9d, r9d
+  mov qword [policy_extra3], 0
+  mov qword [policy_extra3_rights], 0
   call load_program
   test rax, rax
   js fatal
@@ -78,18 +81,49 @@ start:
   mov r13, qword [ipc_request+IpcMessage.caps+IpcCap.handle]
   test r13, r13
   jz .bad_request
+  mov qword [policy_extra3], 0
+  mov qword [policy_extra3_rights], 0
   cmp r12, keyboard_name.size
-  jne .shared_policy
+  jne .terminal_policy
   lea rdi, [ipc_request+IpcMessage.words+8]
   lea rsi, [keyboard_name]
   mov edx, keyboard_name.size
   call bytes_equal
   test eax, eax
+  jz .terminal_policy
+  ;// Первый grant приходит от init (nameserver), ещё два задаёт policy:
+  ;// IRQ и минимальный диапазон портов PS/2.
+  xor edx, edx
+  xor ecx, ecx
+  cmp qword [ipc_request+IpcMessage.cap_count], 2
+  jb .keyboard_devices
+  mov rdx, qword [ipc_request+IpcMessage.caps+IpcCap.bytes+IpcCap.handle]
+  mov rcx, qword [ipc_request+IpcMessage.caps+IpcCap.bytes+IpcCap.rights]
+  .keyboard_devices:
+  mov r8d, IRQ1_CAP
+  mov r9d, CAP_WAIT
+  mov qword [policy_extra3], IO_CAP
+  mov qword [policy_extra3_rights], CAP_READ
+  jmp .load_requested
+
+  .terminal_policy:
+  cmp r12, terminal_name.size
+  jne .shared_policy
+  lea rdi, [ipc_request+IpcMessage.words+8]
+  lea rsi, [terminal_name]
+  mov edx, terminal_name.size
+  call bytes_equal
+  test eax, eax
   jz .shared_policy
-  mov edx, IRQ1_CAP
-  mov ecx, CAP_WAIT
-  mov r8d, IO_CAP
-  mov r9d, CAP_READ
+  xor edx, edx
+  xor ecx, ecx
+  cmp qword [ipc_request+IpcMessage.cap_count], 2
+  jb .terminal_mmio
+  mov rdx, qword [ipc_request+IpcMessage.caps+IpcCap.bytes+IpcCap.handle]
+  mov rcx, qword [ipc_request+IpcMessage.caps+IpcCap.bytes+IpcCap.rights]
+  .terminal_mmio:
+  mov r8d, VGA_CAP
+  mov r9d, CAP_MAP+CAP_READ+CAP_WRITE
   jmp .load_requested
 
   .shared_policy:
@@ -291,6 +325,10 @@ load_program:
   mov [load_extra1_rights], rcx
   mov [load_extra2], r8
   mov [load_extra2_rights], r9
+  mov rax, [policy_extra3]
+  mov [load_extra3], rax
+  mov rax, [policy_extra3_rights]
+  mov [load_extra3_rights], rax
   mov qword [load_space], 0
   mov qword [load_endpoint], 0
   mov qword [load_process], 0
@@ -377,11 +415,22 @@ load_program:
 .extra2:
   mov rax, [load_extra2]
   test rax, rax
-  jz .create_thread
+  jz .extra3
   mov rcx, qword [thread_config+ThreadConfig.grant_count]
   shl rcx, 4
   mov qword [thread_config+ThreadConfig.grants+rcx+SpawnGrant.handle], rax
   mov rax, [load_extra2_rights]
+  mov qword [thread_config+ThreadConfig.grants+rcx+SpawnGrant.rights], rax
+  inc qword [thread_config+ThreadConfig.grant_count]
+
+.extra3:
+  mov rax, [load_extra3]
+  test rax, rax
+  jz .create_thread
+  mov rcx, qword [thread_config+ThreadConfig.grant_count]
+  shl rcx, 4
+  mov qword [thread_config+ThreadConfig.grants+rcx+SpawnGrant.handle], rax
+  mov rax, [load_extra3_rights]
   mov qword [thread_config+ThreadConfig.grants+rcx+SpawnGrant.rights], rax
   inc qword [thread_config+ThreadConfig.grant_count]
 
@@ -633,6 +682,8 @@ init_name db "init.elf"
 .size = $-init_name
 keyboard_name db "keyboard.elf"
 .size = $-keyboard_name
+terminal_name db "terminal.elf"
+.size = $-terminal_name
 shm_sender_name db "shm_sender.elf"
 .size = $-shm_sender_name
 
@@ -648,6 +699,10 @@ load_extra1 dq 0
 load_extra1_rights dq 0
 load_extra2 dq 0
 load_extra2_rights dq 0
+load_extra3 dq 0
+load_extra3_rights dq 0
+policy_extra3 dq 0
+policy_extra3_rights dq 0
 load_ph dq 0
 load_max_end dq 0
 thread_config rb ThreadConfig.bytes

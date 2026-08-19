@@ -1469,6 +1469,15 @@ function task_create_init
   call capability_grant_io
   cmp eax, 5
   jne .failed
+  ;// VGA text buffer — единственный MMIO range первой console policy. Driver
+  ;// получает не физический адрес, а ослабляемую capability на одну страницу.
+  mov rdi, r15
+  mov esi, CAP_MMIO
+  mov edx, 0x000B8000
+  mov ecx, CAP_MAP+CAP_READ+CAP_WRITE
+  call capability_insert_task
+  cmp eax, 6
+  jne .failed
   mov eax, 1
   jmp .done
   .release_endpoint_failed:

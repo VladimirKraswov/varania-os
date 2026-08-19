@@ -27,7 +27,10 @@ Varania OS — небольшая 64-битная capability-based ОС на Fla
 - shared-memory objects до 16 страниц и передача доступа через endpoint IPC;
 - многостраничные code/data, heap через `BRK`, stack growth через #PF;
 - вытесняющий round-robin с квантом 10 мс;
+- user-space VGA terminal с capability только на MMIO-страницу `0xB8000`;
 - user-space PS/2 keyboard driver с правами только на IRQ1 и `0x60..0x64`;
+- user-space RAMFS с каталогами/файлами и независимым FS IPC-протоколом;
+- интерактивный shell: `ls`, `cd`, `mkdir`, `touch`, `pwd`, `clear`, `help`;
 - отдельные QEMU-тесты capabilities/IPC, изоляции памяти и lifecycle;
 - воспроизводимая сборка на macOS Apple Silicon и Linux x86_64.
 
@@ -45,6 +48,9 @@ VARANIA:KILL_OK
 VARANIA:SUPERVISOR_OK
 VARANIA:SHM_OK
 VARANIA:MICROKERNEL_OK
+terminal: user-space VGA console ready
+ramfs: user-space filesystem service ready
+VARANIA:SHELL_READY
 ```
 
 ## Быстрый старт
@@ -76,11 +82,32 @@ make run
 На Linux официальный статический FASM запускается прямо из архива репозитория;
 Docker не требуется.
 
+## Первый интерактивный запуск
+
+После self-tests откроется VGA-консоль:
+
+```text
+Welcome to Varania OS
+User-space VGA terminal and RAMFS are ready.
+Type 'help' for available commands.
+
+varania:/$ ls
+bin/
+etc/
+home/
+README
+varania:/$
+```
+
+RAMFS не имеет пользователей, UID/GID, mode bits и `sudo`: на этом учебном
+этапе любой процесс, получивший endpoint файлового сервиса, работает в одном
+доверенном домене. Граница доступа строится capabilities, а не POSIX-правами.
+
 ## Команды
 
 | Команда | Назначение |
 |---|---|
-| `make build` | boot, kernel, 15 user ELF, initramfs и raw image |
+| `make build` | boot, kernel, 18 user ELF, initramfs и raw image |
 | `make check` | структура диска, initramfs и каждого ELF/PT_LOAD |
 | `make smoke` | полный boot и IRQ1 через QMP |
 | `make test-capabilities` | procd, nameserver, capability transfer и IPC queue |
@@ -89,6 +116,7 @@ Docker не требуется.
 | `make test-revoke` | дерево capability lineage и рекурсивный revoke |
 | `make test-supervisor` | kill заблокированного процесса и два restart |
 | `make test-shared` | две общие страницы, IPC transfer и teardown |
+| `make test-shell` | PS/2-ввод, команды RAMFS и видимый текст VGA |
 | `make test` | все статические и QEMU-тесты |
 | `make run` | интерактивный QEMU |
 | `make debug` | QEMU с `qemu-debug.log` |
@@ -108,8 +136,14 @@ flowchart LR
     I --> N["nameserver"]
     N --> S["service endpoint"]
     N --> C["client"]
+    I --> T["VGA terminal"]
     I --> D["keyboard driver"]
-    I --> H["shared-memory peers"]
+    I --> F["RAMFS driver"]
+    I --> SH["shell"]
+    D -->|"ASCII events"| T
+    SH -->|"terminal IPC"| T
+    SH -->|"filesystem IPC"| F
+    I --> M["shared-memory peers"]
 ```
 
 Ядро знает только bootstrap-имя `procd.elf`. Procd получает read-only mapping
@@ -132,7 +166,11 @@ src/user/procd.asm              initramfs + ELF64 loader + process service
 src/user/init.asm               запуск сервисов и интеграционный сценарий
 src/user/supervisor.asm         внешний kill и restart policy
 src/user/nameserver.asm         user-space service discovery
-src/user/*.asm                  сервисы, драйвер и тестовые процессы
+src/user/terminal.asm           VGA, scroll, echo и line discipline
+src/user/keyboard.asm           PS/2 scan code → ASCII event
+src/user/ramfs.asm              volatile filesystem driver
+src/user/shell.asm              интерактивная командная оболочка
+src/user/*.asm                  сервисы и тестовые процессы
 tests/                          structural и headless QEMU tests
 ```
 
@@ -144,6 +182,7 @@ tests/                          structural и headless QEMU tests
 - [ABI системных вызовов](docs/SYSCALLS.md)
 - [User-space loader, initramfs и ELF64](docs/USERSPACE.md)
 - [Драйверы в ring 3](docs/DRIVERS.md)
+- [Файловый протокол, RAMFS и shell](docs/FILESYSTEM.md)
 - [Сборка, тесты и отладка](docs/DEVELOPMENT.md)
 - [История порта](docs/PORTING.md)
 
@@ -151,13 +190,15 @@ tests/                          structural и headless QEMU tests
 
 - один CPU, legacy BIOS/PIC/PIT; нет UEFI, APIC, SMP и ACPI;
 - один thread на process в текущем user API, максимум 16 TCB slots;
-- initramfs фиксирован на 64 KiB; нет VFS, дискового сервера и сети;
+- initramfs фиксирован на 64 KiB; RAMFS volatile и теряется при перезагрузке;
+- RAMFS хранит только дерево/имена: чтение содержимого и disk FS ещё не добавлены;
 - только статические `ET_EXEC`; нет PIE, relocations и dynamic linker;
 - stack ограничен 16 страницами, heap — 256 страницами;
 - IPC control payload мал и копируется; для bulk data есть shared memory, но
   пока без частичного unmap и resize;
 - нет fork, signals и POSIX runtime; restart policy пока демонстрационная;
-- IRQ/I/O покрывают PS/2; для MMIO/DMA нужны Frame/IRQ policy и IOMMU;
+- MMIO пока выдан только VGA text page; PCI/DMA требуют device manager и IOMMU;
+- раскладка клавиатуры пока US set-1 без Shift/Ctrl и Unicode;
 - нет ASLR, SMEP/SMAP, SMP-locking и transfer между несколькими CPU;
 - cyclic endpoint capabilities могут образовать логический цикл владения.
 

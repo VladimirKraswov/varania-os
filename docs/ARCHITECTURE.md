@@ -8,7 +8,7 @@ Ring 0 содержит механизмы, которым нужны приви
 - физические frames, page tables и безопасное копирование user memory;
 - TCB scheduler и lifecycle;
 - kernel objects, capability tables, refcount и endpoint queues;
-- минимальные IRQ/I/O операции после проверки capability;
+- минимальные IRQ/I/O и MMIO mapping после проверки capability;
 - bootstrap-проверку архива и загрузку единственного `procd.elf`.
 
 Ring 0 не принимает имя обычной программы и не разбирает её ELF при создании.
@@ -28,6 +28,10 @@ flowchart TB
     P -->|"space/frame/map/thread"| K["microkernel"]
     I -->|"wait"| K
     D["keyboard driver"] -->|"IRQ1 + I/O caps"| K
+    D -->|"ASCII"| T["VGA terminal"]
+    T -->|"MMIO cap"| K
+    H["shell"] -->|"terminal IPC"| T
+    H -->|"filesystem IPC"| F["RAMFS driver"]
     K --> M["PMM / VMM / scheduler"]
 ```
 
@@ -83,6 +87,7 @@ User layout:
 |---|---|
 | `0x00010000..0x3FFFFFFF` | ELF `PT_LOAD` и heap |
 | `0x40000000..0x7FFFFFFF` | convention для user object/shared mappings |
+| `0x50000000` | VGA MMIO только в address space terminal |
 | `0x80000000..0x8000FFFF` | bootfs, только procd, R+NX |
 | до `0x00007FFFFFF00000` | растущий user stack |
 
@@ -104,6 +109,7 @@ Heap начинается с выровненного максимального
 | `Process` | slot+generation token | таблица TCB + WAIT lifecycle |
 | `IRQ` | irq+1 | уникальная маршрутизация |
 | `I/O` | base+length | value capability |
+| `MMIO` | доверенный page-aligned physical address | value capability |
 | `System/Bootfs` | bootstrap token | не refcounted |
 
 Creator получает временную ссылку; успешная вставка capability добавляет
@@ -121,18 +127,29 @@ Frame capability -> SPACE_MAP -> leaf PTE -> AddressSpace teardown -> PMM
 После успешного map capability потребляется, metadata Frame уничтожается, а
 physical frame освобождается только вместе с mapping/address space.
 
-Shared-memory использует другой ownership:
+Shared-memory и device MMIO используют borrowed leaf PTE:
 
 ```text
 SharedMemory object -> physical frames
 AddressSpace mapping -> strong ref на SharedMemory + borrowed PTE
 ```
 
-Флаг `PAGE.SHARED` занимает software-доступный бит PTE. Поэтому обычный teardown
-не освобождает borrowed leaf frame. Сначала уничтожаются PTE конкретного space,
-затем его mapping records отпускают SharedMemory; последний ref возвращает все
-кадры PMM. Отображения всегда NX, могут быть read-only или RW и живут до
-разрушения address space. Частичного `unmap` в текущем ABI нет.
+Флаг `PAGE.BORROWED` занимает software-доступный бит PTE. Поэтому обычный
+teardown не освобождает leaf frame. Для shared memory mapping record удерживает
+объект, а последний ref возвращает его кадры PMM. Для MMIO физическая страница
+принадлежит устройству и никогда не входила в PMM. Оба вида отображений NX и
+живут до разрушения address space. Частичного `unmap` в текущем ABI нет.
+
+## Терминал и файловый сервис
+
+Интерактивная цепочка целиком находится в ring 3. Keyboard driver получает
+IRQ1 и порты PS/2, переводит scan code set 1 в ASCII и отправляет `TERM_KEY`.
+Terminal владеет одной VGA MMIO page, cursor, scrolling, echo и line discipline.
+Shell получает готовую строку и общается с RAMFS отдельным FS-протоколом.
+
+RAMFS — не часть initramfs: initramfs является read-only boot archive для ELF,
+а RAMFS — изменяемое runtime-дерево каталогов. Ядро не знает `ls`, path, inode
+или имя файла. Подробный ABI описан в [FILESYSTEM.md](FILESYSTEM.md).
 
 ## Дерево происхождения capabilities
 

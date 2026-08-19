@@ -70,20 +70,6 @@ start:
   mov rdi, rdx
   call close_handle
 
-  ;// Выбор IRQ/I/O capability для keyboard — bootstrap policy procd. Init не
-  ;// владеет железом и потому не может случайно расширить права драйвера.
-  lea rdi, [keyboard_name]
-  mov esi, keyboard_name.size
-  xor edx, edx
-  xor ecx, ecx
-  call spawn
-  test rax, rax
-  js init_failed
-  mov rdi, rax
-  call close_handle
-  mov rdi, rdx
-  call close_handle
-
   mov rdi, r13
   call wait_success
   test rax, rax
@@ -171,6 +157,31 @@ start:
   jne init_failed
 
   log all_ok_text, all_ok_text.size
+
+  ;// Интерактивный стек запускается после self-tests. Terminal очистит VGA и
+  ;// передаст экран shell; диагностический SYS_LOG продолжит идти в debugcon.
+  ;// Init выдаёт каждому сервису только SEND-capability nameserver. MMIO,
+  ;// IRQ1 и PS/2 I/O добавляет точечная bootstrap policy процесса procd.
+  lea rdi, [terminal_name]
+  mov esi, terminal_name.size
+  call spawn_interactive
+  test rax, rax
+  jnz init_failed
+  lea rdi, [ramfs_name]
+  mov esi, ramfs_name.size
+  call spawn_interactive
+  test rax, rax
+  jnz init_failed
+  lea rdi, [keyboard_name]
+  mov esi, keyboard_name.size
+  call spawn_interactive
+  test rax, rax
+  jnz init_failed
+  lea rdi, [shell_name]
+  mov esi, shell_name.size
+  call spawn_interactive
+  test rax, rax
+  jnz init_failed
 .idle:
   system_call SYS_YIELD
   jmp .idle
@@ -248,6 +259,25 @@ spawn_lifecycle:
   mov rdi, rdx
   call close_handle
   pop rax
+.done:
+  ret
+
+;// Запустить долгоживущий сервис с доступом к nameserver и сразу закрыть
+;// управляющую capability: жизненным циклом интерактивного стека позже будет
+;// управлять отдельный supervisor, а init остаётся минимальным bootstrap.
+;// RDI=name, RSI=len. RAX=0/error.
+spawn_interactive:
+  mov rdx, r12
+  mov ecx, CAP_SEND
+  call spawn
+  test rax, rax
+  js .done
+  mov r8, rdx
+  mov rdi, rax
+  call close_handle
+  mov rdi, r8
+  call close_handle
+  xor eax, eax
 .done:
   ret
 
@@ -344,6 +374,12 @@ isolation_name db "isolation_test.elf"
 .size = $-isolation_name
 keyboard_name db "keyboard.elf"
 .size = $-keyboard_name
+terminal_name db "terminal.elf"
+.size = $-terminal_name
+ramfs_name db "ramfs.elf"
+.size = $-ramfs_name
+shell_name db "shell.elf"
+.size = $-shell_name
 lifecycle_name db "lifecycle_child.elf"
 .size = $-lifecycle_name
 revoke_name db "cap_revoke_test.elf"

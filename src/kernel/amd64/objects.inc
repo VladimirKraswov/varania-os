@@ -16,6 +16,7 @@ CAP_FRAME    = 6
 CAP_SPACE    = 7
 CAP_BOOTFS   = 8
 CAP_SHARED   = 9
+CAP_MMIO     = 10
 
 CAP_SEND     = 1
 CAP_READ     = 2

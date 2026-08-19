@@ -427,8 +427,8 @@ function vmm_destroy_pt
     mov rdi, [rbx+rcx*8]
     test dil, PAGE.P
     jz .next
-    test rdi, PAGE.SHARED
-    jnz .next                     ;// borrowed frame освободит SharedMemory
+    test rdi, PAGE.BORROWED
+    jnz .next                     ;// borrowed frame принадлежит object/device
     and edi, -PAGE_SIZE
     push rcx
     call pmm_free_frame

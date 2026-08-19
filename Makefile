@@ -9,7 +9,8 @@ INITRAMFS_IMAGE := INITRAMFS.BIN
 DISK_IMAGE   := VOS.VHD
 
 USER_BUILD := build/user
-USER_PROGRAMS := procd init nameserver service client keyboard memory_test isolation_test \
+USER_PROGRAMS := procd init nameserver service client terminal keyboard ramfs shell \
+		 memory_test isolation_test \
 		 lifecycle_child cap_revoke_test supervisor kill_target restart_worker \
 		 shm_receiver shm_sender
 USER_ELFS := $(addprefix $(USER_BUILD)/,$(addsuffix .elf,$(USER_PROGRAMS)))
@@ -20,7 +21,7 @@ KERNEL_SOURCES := src/kernel/kernel.asm src/const.inc \
                   $(wildcard src/kernel/amd64/*.inc)
 
 .PHONY: all build check smoke test-capabilities test-isolation test-lifecycle \
-	test-revoke test-supervisor test-shared test run debug clean help
+	test-revoke test-supervisor test-shared test-shell test run debug clean help
 
 all: build
 
@@ -67,7 +68,10 @@ test-supervisor: check
 test-shared: check
 	python3 tests/test_shared_memory.py
 
-test: smoke test-capabilities test-isolation test-lifecycle test-revoke test-supervisor test-shared
+test-shell: check
+	python3 tests/test_shell.py
+
+test: smoke test-capabilities test-isolation test-lifecycle test-revoke test-supervisor test-shared test-shell
 
 run: check
 	$(QEMU_RUNNER)
@@ -84,12 +88,13 @@ help:
 	@printf '%s\n' \
 	  'make build  — собрать загрузчик, ядро, ELF, initramfs и raw-образ' \
 	  'make run    — проверить образ и запустить QEMU' \
-	  'make test   — статические проверки + headless smoke-тест' \
+	  'make test   — все статические и headless QEMU-тесты' \
 	  'make test-capabilities — отдельно проверить endpoint/capability transfer' \
 	  'make test-isolation — отдельный QEMU-тест памяти и изоляции' \
 	  'make test-lifecycle — отдельный QEMU-тест create/exit/wait/teardown' \
 	  'make test-revoke — проверить дерево происхождения и revoke descendants' \
 	  'make test-supervisor — проверить внешний kill и restart policy' \
 	  'make test-shared — проверить межпроцессную shared memory и IPC' \
+	  'make test-shell — ввести команды и проверить RAMFS через VGA' \
 	  'make debug  — QEMU с журналом прерываний/ошибок' \
 	  'make clean  — удалить только создаваемые сборкой файлы'

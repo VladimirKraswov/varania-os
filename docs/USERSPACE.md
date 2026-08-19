@@ -82,13 +82,15 @@ PIE, `PT_INTERP`, relocations, shared libraries и demand paging executable по
 | 3 | bootfs mapping | `READ` |
 | 4 | IRQ1 | `WAIT` |
 | 5 | ports `0x60..0x64` | `READ` |
+| 6 | VGA MMIO page `0xB8000` | `MAP|READ|WRITE` |
 
 Procd передаёт init свой inbox как handle 1 и ослабленный control endpoint как
 handle 2. Каждый последующий процесс также получает собственный endpoint как
 handle 1. Дополнительные grants идут с handle 2 в порядке `ThreadConfig`.
 
 IRQ1 уникален: при создании keyboard driver он перемещается из procd. I/O range
-копируется read-only. Ни init, ни nameserver не владеют hardware capabilities.
+копируется read-only. VGA capability выдаётся только `terminal.elf`. Ни init,
+ни nameserver, ни shell не владеют hardware capabilities.
 
 ## Протокол procd
 
@@ -106,15 +108,17 @@ Success reply содержит `words[0]=0`, process capability с `WAIT|CONTROL
 handles. Ошибка возвращается в `words[0]` без capabilities.
 
 Особые grants задаёт bootstrap policy procd, а не запрашивающий процесс:
-keyboard получает IRQ/I/O, а `shm_sender` — `CREATE`. Получатель shared memory
+keyboard получает nameserver/IRQ/I/O, terminal — nameserver/VGA MMIO, а
+`shm_sender` — `CREATE`. Получатель shared memory
 не получает system capability: sender передаёт ему только ослабленный
 `MAP|READ|WRITE` handle обычным endpoint IPC.
 
 ## Init, nameserver и сервисы
 
-Init запускает nameserver, service, client, keyboard driver и изолированные
-integration-процессы. Чтобы дать service/client доступ к registry, init передаёт им
-только `CAP_SEND` к endpoint nameserver.
+Init сначала запускает nameserver и изолированные integration-процессы. После
+успеха self-tests он создаёт terminal, RAMFS, keyboard driver и shell. Каждому
+из них init передаёт только `CAP_SEND` к endpoint nameserver; hardware grants
+добавляет policy procd.
 
 Service регистрирует собственный inbox capability. Client делает lookup,
 передавая reply endpoint; nameserver возвращает ослабленный service endpoint.
@@ -163,6 +167,7 @@ message db "hello from ring 3", 10
 - `lifecycle_child.elf`: status 37 и сравнение PMM frame count после teardown;
 - `service/client/nameserver`: endpoint queue и capability transfer;
 - `keyboard.elf`: реальный IRQ1, отправляемый тестом через QMP;
+- `terminal/ramfs/shell`: ввод QEMU key events, FS lifecycle и чтение VGA page;
 - `cap_revoke_test.elf`: цепочка из двух descendants и сохранение root;
 - `supervisor.elf`: kill blocked target и два restart завершившегося worker;
 - `shm_sender/receiver.elf`: две общие страницы, capability transfer,

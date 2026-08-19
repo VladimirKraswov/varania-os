@@ -78,10 +78,10 @@ def main() -> None:
             # Ждём именно user-драйвер, а не фиксированную задержку: CI и
             # Mac M1 могут иметь разную скорость TCG.
             assert process.stdout is not None
-            boot_deadline = time.monotonic() + 5
+            boot_deadline = time.monotonic() + 15
             while DRIVER_MARKER not in captured:
                 if time.monotonic() >= boot_deadline:
-                    raise TimeoutError("keyboard-driver не запустился за 5 секунд")
+                    raise TimeoutError("keyboard-driver не запустился за 15 секунд")
                 readable, _, _ = select.select([process.stdout], [], [], 0.1)
                 if not readable:
                     continue

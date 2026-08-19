@@ -46,6 +46,7 @@
 | 25 | `SHARED_CREATE` | `system_cap`, `pages` | shared handle, `pages=1..16` |
 | 26 | `SHARED_MAP` | `shared_cap`, `virtual`, `flags` | map в текущий space |
 | 27 | `CAP_REVOKE` | `handle` | число закрытых active descendants |
+| 28 | `MMIO_MAP` | `mmio_cap`, `virtual` | одна device page как RW+NX |
 
 Основные errno: `-2` no entry, `-9` bad capability, `-11` queue/full slots,
 `-12` no memory, `-14` bad user pointer, `-16` busy, `-22` invalid argument,
@@ -114,6 +115,14 @@ AddressSpace по page-aligned адресу. Разрешены флаги `0` �
 `MAP|READ`. Один объект можно передать через IPC и отобразить в нескольких
 процессах; mapping удерживает object ref до teardown address space.
 
+`MMIO_MAP` принимает page-aligned user address и capability типа MMIO с
+`MAP|READ|WRITE`. x86-64 не имеет write-only PTE, поэтому права явно отражают
+фактическую возможность чтения. Физический адрес находится внутри capability
+и не передаётся user process аргументом. Сейчас bootstrap policy создаёт одну
+capability — VGA text page `0xB8000` для `terminal.elf`. Mapping получает
+`USER|RW|NX|BORROWED`: teardown удаляет page tables, но не пытается вернуть
+device page в PMM. Повторное отображение в занятый virtual address даёт `-16`.
+
 ## Создание thread
 
 ```c
@@ -165,6 +174,7 @@ RW+NX pages, shrink возвращает frames. Page fault непосредст
 - `P|US` проверяется на всех четырёх уровнях page tables;
 - при копировании заблокированному receiver используется его CR3, не текущий;
 - I/O/IRQ проверяют type, rights и границы диапазона;
+- MMIO address приходит только из capability, mapping всегда NX;
 - kernel stack, TCB и object metadata не читаются из user memory;
 - raw physical address, process token и kernel object pointer никогда не
-  возвращаются как пользовательские полномочия.
+  выбираются пользователем как полномочия.

@@ -6,6 +6,7 @@ include "abi.inc"
 ;// только ослабленную SEND-capability зарегистрированного endpoint.
 
 SELF_EP = 1
+SERVICE_MAX = 8
 
 segment readable executable
 start:
@@ -24,10 +25,16 @@ start:
 .register:
   cmp qword [message+IpcMessage.cap_count], 1
   jne .clear
-  mov rdi, [service_endpoint]
+  mov rbx, qword [message+IpcMessage.words+8]
+  test rbx, rbx
+  jz .clear
+  cmp rbx, SERVICE_MAX
+  ja .clear
+  dec rbx
+  mov rdi, [service_endpoints+rbx*8]
   call close_handle
   mov rax, qword [message+IpcMessage.caps+IpcCap.handle]
-  mov [service_endpoint], rax
+  mov [service_endpoints+rbx*8], rax
   log registered_text, registered_text.size
   jmp .clear_without_received_caps
 
@@ -39,7 +46,13 @@ start:
   mov ecx, IpcMessage.bytes
   xor eax, eax
   rep stosb
-  mov rax, [service_endpoint]
+  mov rbx, qword [message+IpcMessage.words+8]
+  test rbx, rbx
+  jz .missing
+  cmp rbx, SERVICE_MAX
+  ja .missing
+  dec rbx
+  mov rax, [service_endpoints+rbx*8]
   test rax, rax
   jz .missing
   mov qword [reply+IpcMessage.words], 0
@@ -100,6 +113,6 @@ registered_text db "nameserver: service endpoint registered", 10
 failed_text db "nameserver: IPC error", 10
 .size = $-failed_text
 align 8
-service_endpoint dq 0
+service_endpoints dq SERVICE_MAX dup(0)
 message rb IpcMessage.bytes
 reply rb IpcMessage.bytes

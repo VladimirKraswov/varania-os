@@ -31,7 +31,7 @@ make clean && make test
 
 Проверяются:
 
-1. сборка boot/kernel, 15 user ELF, initramfs и raw image;
+1. сборка boot/kernel, 18 user ELF, initramfs и raw image;
 2. `55 AA`, размеры, точная конкатенация и SHA-256 FASM;
 3. каждый ELF header/program header, file bounds, W^X и page overlap;
 4. многостраничные RX/RW segments `memory_test.elf`;
@@ -41,7 +41,8 @@ make clean && make test
 8. create/exit/wait, deferred teardown, возврат frames и slot reuse;
 9. lineage tree, revoke двух поколений и сохранение root capability;
 10. внешний kill blocked task и два перезапуска user-space supervisor;
-11. shared mapping двух страниц, IPC transfer и возврат frames после teardown.
+11. shared mapping двух страниц, IPC transfer и возврат frames после teardown;
+12. PS/2 → terminal → shell → RAMFS и фактический текст VGA после команд.
 
 Тесты можно запускать отдельно:
 
@@ -53,6 +54,7 @@ make test-lifecycle
 make test-revoke
 make test-supervisor
 make test-shared
+make test-shell
 ```
 
 TCG одинаково работает на Mac ARM и Linux и не требует KVM/HVF. Каждый
@@ -64,8 +66,11 @@ headless-тест ограничен таймаутом и сам заверша
 make run
 ```
 
-После загрузки PS/2-клавиатура обслуживается пользовательским драйвером. Для
-текстового вывода без окна:
+После self-tests пользовательский terminal очищает VGA, печатает приветствие и
+shell показывает `varania:/$`. Команда `ls` выводит `bin/`, `etc/`, `home/` и
+`README`; доступны также `cd`, `mkdir`, `touch`, `pwd`, `clear`, `help`.
+
+Для диагностического вывода без окна:
 
 ```bash
 ./c.sh run -display none -serial none -monitor none \
@@ -89,6 +94,8 @@ make debug
 - нет `REVOKE_OK` — проверить CapNode parent/ghost/pinned и rollback IPC;
 - нет `SUPERVISOR_OK` — проверить CONTROL grant, cancel block и WAIT status;
 - нет `SHM_OK` — проверить borrowed PTE, mapping ref и права shared cap;
+- нет `SHELL_READY` — проверить terminal/RAMFS registration и nameserver IDs;
+- `SHELL_LS_OK` есть, но VGA пуст — проверить MMIO cap и `PAGE.BORROWED`;
 - IRQ storm — проверить one-shot mask/unmask и сброс состояния устройства.
 
 ## Правила кода
@@ -104,6 +111,7 @@ make debug
 - производная capability всегда получает CapNode parent; queue node pinned;
 - успешный `SPACE_MAP` потребляет frame и передаёт ownership leaf mapping;
 - shared PTE не владеет frame и обязан удерживаться mapping-ссылкой на object;
+- MMIO PTE не владеет device page и всегда должен оставаться NX;
 - process object хранит token с generation, не голый slot;
 - у IRQ и SYSCALL должен оставаться единый `Context`;
 - текущий CR3/kernel stack нельзя освобождать на exit path;
