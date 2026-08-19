@@ -15,12 +15,12 @@ uint32 equ dword
 uint16 equ word
 uint8  equ byte
 
-;// Используется при сохранении всех регистров при создании процедуры 
-all_regs equ eax ecx edx ebx esp ebp esi edi 
+;// Используется при сохранении всех регистров при создании процедуры
+all_regs equ eax ecx edx ebx esp ebp esi edi
 ;// Используется для сохранения всех регистров кроме EAX, для возврата значения
 not_eax  equ ecx edx ebx esp ebp esi edi
 
-;// Выход из процедуры с возвратом знасения
+;// Выход из процедуры с возвратом значения
 macro return result
 {
   if result eq eax
@@ -32,7 +32,7 @@ macro return result
   end if
 }
 
-;// Прервать цыкл
+;// Прервать цикл
 macro .break { jmp __ENDW }
 ;// Очистка регистра
 macro clr reg { xor reg, reg }
@@ -64,16 +64,4 @@ macro outd port, data
 macro inb reg, port { in reg, port }
 macro inw reg, port { in reg, port }
 macro ind reg, port { in reg, port }
-
-
-
-
-
-
-
-
-
-
-
-
 
