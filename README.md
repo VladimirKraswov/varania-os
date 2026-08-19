@@ -30,6 +30,12 @@ Varania OS показывает устройство 64-битной capability-
 - загрузка ELF64 прямо из VaraniaFS через shared capability и `procd`;
 - официальный FASM 1.73.35 с Varania platform layer: VFS, terminal, heap, exit;
 - `libvarania`: строки/IPC/VFS/terminal/session/process и versioned `.vlib` services;
+- VBE 2.0 linear framebuffer до 1280×800 и CPU-only compositor в ring 3;
+- изолированные PS/2 mouse и RTC/ACPI platform drivers с узкими capabilities;
+- desktop, штатные обои, movable shortcuts, Start/taskbar/clock;
+- оконный менеджер и графический terminal: move/minimize/maximize/close;
+- общий `gui.vlib` renderer: button/radio/toggle/checkbox/text edit/scroll/list,
+  tabs/panel/icon button/label/image без копирования UI-кода в приложения;
 - полноэкранный VEdit: создание/правка, FASM-подсветка, debug, build/run/template;
 - shell: `ls`, `cd`, `mkdir`, `touch`, `cat`, `write`, `append`, `edit`, `run`,
   `pwd`, `clear`, `help`;
@@ -122,6 +128,17 @@ foreground-процесс, а terminal + `sessiond`; shell вернётся со
 В формате намеренно нет UID/GID/mode/ACL и аналога `sudo`. Доступ задаётся
 endpoint capability процесса, а не POSIX-моделью прав.
 
+Графический рабочий стол запускается обычной программой:
+
+```text
+varania:/$ desktop
+```
+
+Дважды нажмите `TERMINAL` либо выберите `START → TERMINAL`. В открытом окне
+работают тот же shell, VEdit и FASM; окно перемещается и имеет кнопки свернуть,
+развернуть/восстановить и закрыть. Подробнее — [графическая подсистема и UI
+ABI](docs/GUI.md).
+
 ## Образы и обмен файлами
 
 Сборка создаёт два sparse-образа логическим размером 1 GiB:
@@ -144,11 +161,12 @@ python3 tools/vafs/vafs.py fsck VARANIA.VAFS --data
 
 | Команда | Что проверяет или запускает |
 |---|---|
-| `make build` | kernel, 20 bootstrap ELF, disk ELF/FASM и оба sparse-диска |
+| `make build` | kernel, 23 bootstrap ELF, disk ELF/FASM и оба sparse-диска |
 | `make check` | boot layout, ELF W^X, FASM hash и VaraniaFS fsck |
 | `make smoke` | boot, процессы, IPC, IRQ1 и NVMe DMA read/write/flush |
 | `make test-shell` | keyboard → terminal → VFS → NVMe и remount/fsck |
-| `make test-editor` | burst input, VEdit/FASM, Ctrl+C supervisor и цветной VGA |
+| `make test-editor` | burst input, VEdit/FASM, Ctrl+C и цветной VBE framebuffer |
+| `make test-gui` | VBE 1280×800, mouse, desktop, wallpaper и window controls |
 | `make test-vafs` | COW, CRC32C, B+tree, torn-super recovery и raw offset |
 | `make test` | все structural и QEMU-тесты |
 | `make run` | интерактивная VM |
@@ -165,13 +183,18 @@ src/kernel/amd64/               memory, objects, IPC, scheduler, syscalls
 src/user/procd.asm              строгий ELF64 loader и process service
 src/user/nvme.asm               PCIe/NVMe ring-3 block driver
 src/user/vafs.asm               persistent COW filesystem server
-src/user/terminal.asm           VGA terminal и line discipline
+src/user/terminal.asm           line discipline и VGA/VBE cell mirror
 src/user/keyboard.asm           PS/2 compatibility input driver
+src/user/gui.asm                video/compositor/window manager/UI runtime
+src/user/mouse.asm              изолированный PS/2 mouse driver
+src/user/platform.asm           RTC clock и ACPI power service
 src/user/sessiond.asm           стек foreground CONTROL и независимый Ctrl+C
 src/user/shell.asm              файловая командная оболочка
 src/lib/                        системная библиотека и клиенты .vlib ABI
 src/fasm/                       platform layer официального FASM 1.73.35
 src/programs/edit.asm           полноэкранный системный редактор
+src/programs/desktop.asm        desktop policy и launcher приложений
+src/programs/gterm.asm          lifecycle графического terminal window
 src/programs/sysinfo.asm        короткий пример приложения libvarania
 system/                         manifests библиотек и шаблоны системного тома
 tools/vafs/vafs.py              macOS/Linux VaraniaFS CLI
@@ -188,6 +211,7 @@ tests/                          structural, recovery и QEMU end-to-end tests
 - [User-space ELF loader](docs/USERSPACE.md)
 - [FASM и граница self-hosting](docs/FASM.md)
 - [Системная библиотека и аналог DLL](docs/LIBRARIES.md)
+- [Графическая подсистема, desktop и UI ABI](docs/GUI.md)
 - [VEdit: управление, подсветка и build/run](docs/EDITOR.md)
 - [Сборка и тесты](docs/DEVELOPMENT.md)
 - [Драйверы в ring 3](docs/DRIVERS.md)
@@ -196,7 +220,7 @@ tests/                          structural, recovery и QEMU end-to-end tests
 
 - firmware bootstrap ещё BIOS, а не UEFI/GPT; QEMU machine пока `pc`, не `q35`;
 - scheduler однопроцессорный PIC/PIT; ACPI, APIC, SMP-locking ещё впереди;
-- terminal использует VGA text mode, keyboard — PS/2 set 1; GOP/USB HID не готовы;
+- video использует BIOS VBE framebuffer, input — PS/2; UEFI GOP/USB HID не готовы;
 - VaraniaFS v1 использует append allocator без segment cleaner/discard;
 - только `procd`/`init` и bootstrap-сервисы берутся из initramfs; обычные ELF
   уже читаются непосредственно из VaraniaFS;
@@ -205,6 +229,6 @@ tests/                          structural, recovery и QEMU end-to-end tests
   ещё предстоит перенести с host Makefile;
 - только статические ELF64 `ET_EXEC`, без PIE/ELF dynamic linker; динамическая
   функциональность уже подключается через versioned `.vlib` capability services;
-- один user thread на процесс, максимум 16 активных TCB.
+- один user thread на процесс, максимум 24 активных TCB.
 
 Эти пункты — следующий план работ, а не скрытые обещания готовой production-ОС.

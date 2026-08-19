@@ -165,12 +165,22 @@ start:
 
   log all_ok_text, all_ok_text.size
 
-  ;// Интерактивный стек запускается после self-tests. Terminal очистит VGA и
-  ;// передаст экран shell; диагностический SYS_LOG продолжит идти в debugcon.
-  ;// Init выдаёт каждому сервису только SEND-capability nameserver. MMIO,
-  ;// IRQ1 и PS/2 I/O добавляет точечная bootstrap policy процесса procd.
+  ;// Интерактивный стек запускается после self-tests. GUI рисует VBE-консоль,
+  ;// terminal передаёт экран shell; SYS_LOG продолжит идти только в debugcon.
+  ;// Init выдаёт сервисам SEND-capability nameserver. Framebuffer/VGA MMIO,
+  ;// IRQ1/IRQ12, PS/2, RTC и ACPI добавляет точечная policy процесса procd.
   lea rdi, [sessiond_name]
   mov esi, sessiond_name.size
+  call spawn_interactive
+  test rax, rax
+  jnz init_failed
+  lea rdi, [gui_name]
+  mov esi, gui_name.size
+  call spawn_interactive
+  test rax, rax
+  jnz init_failed
+  lea rdi, [platform_name]
+  mov esi, platform_name.size
   call spawn_interactive
   test rax, rax
   jnz init_failed
@@ -186,6 +196,11 @@ start:
   jnz init_failed
   lea rdi, [vafs_name]
   mov esi, vafs_name.size
+  call spawn_interactive
+  test rax, rax
+  jnz init_failed
+  lea rdi, [mouse_name]
+  mov esi, mouse_name.size
   call spawn_interactive
   test rax, rax
   jnz init_failed
@@ -422,6 +437,12 @@ isolation_name db "isolation_test.elf"
 .size = $-isolation_name
 keyboard_name db "keyboard.elf"
 .size = $-keyboard_name
+gui_name db "gui.elf"
+.size = $-gui_name
+platform_name db "platform.elf"
+.size = $-platform_name
+mouse_name db "mouse.elf"
+.size = $-mouse_name
 terminal_name db "terminal.elf"
 .size = $-terminal_name
 nvme_name db "nvme.elf"

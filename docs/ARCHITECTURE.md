@@ -27,9 +27,12 @@ flowchart TB
     P -->|"space/frame/map/thread"| K["microkernel"]
     I -->|"wait"| K
     D["keyboard driver"] -->|"IRQ1 + I/O caps"| K
-    D -->|"ASCII"| T["VGA terminal"]
+    D -->|"key events"| T["terminal model"]
     T -->|"Ctrl+C"| V
-    T -->|"MMIO cap"| K
+    T -->|"coloured cells"| G["GUI/compositor/WM"]
+    MD["mouse driver"] -->|"pointer IPC"| G
+    G -->|"framebuffer MMIO cap"| K
+    DS["desktop policy"] -->|"semantic GUI events"| G
     H["shell"] -->|"terminal IPC"| T
     H -->|"filesystem IPC"| F["VaraniaFS server"]
     F -->|"block IPC"| B["NVMe driver"]
@@ -45,7 +48,8 @@ Bootstrap ELF loader всё ещё находится в kernel, потому ч
 ## Загрузка
 
 1. BIOS загружает MBR в `0x7C00`, затем stage 2 в `0x1000`.
-2. Real mode включает A20, читает kernel/initramfs ниже 1 MiB и получает E820.
+2. Real mode включает A20, читает kernel/initramfs ниже 1 MiB, получает E820 и
+   выбирает лучший 32-bpp VBE linear framebuffer не больше 1280×800.
 3. Protected mode строит bootstrap tables, переносит kernel в `0x100000`,
    initramfs в `0x400000`, готовит GDT/TSS.
 4. CPU включает `CR4.PAE`, `EFER.LME`, `CR0.PG|WP` и прыгает в higher half.
@@ -92,7 +96,7 @@ User layout:
 |---|---|
 | `0x00010000..0x3FFFFFFF` | ELF `PT_LOAD` и heap |
 | `0x40000000..0x7FFFFFFF` | convention для user object/shared mappings |
-| `0x50000000` | VGA MMIO только в address space terminal |
+| `0x50000000` | device MMIO: VGA в terminal space, VBE LFB в GUI space |
 | `0x80000000..0x8002FFFF` | bootfs, только procd, R+NX |
 | до `0x00007FFFFFF00000` | растущий user stack |
 
@@ -150,9 +154,16 @@ teardown не освобождает leaf frame. Для shared memory mapping re
 
 Интерактивная цепочка целиком находится в ring 3. Keyboard driver получает
 IRQ1 и порты PS/2, переводит scan code set 1 в key/modifier event и отправляет
-`TERM_KEY`. Terminal владеет одной VGA MMIO page, cursor, scrolling, echo,
-line discipline, raw-key и цветным cell API. Shell получает готовую строку,
-VEdit — raw keys, но ни один из них не получает VGA capability. Оба общаются с
+`TERM_KEY`. Terminal владеет compatibility VGA page, cursor, scrolling, echo,
+line discipline, raw-key и цветным cell API; те же cells он зеркалирует по IPC
+в `gui.elf`. GUI один владеет VBE framebuffer, backbuffer, pointer focus,
+desktop и window manager. Поэтому shell, VEdit и FASM автоматически работают
+как в полноэкранной консоли, так и внутри graphical terminal window, не получая
+ни VGA, ни framebuffer capability. Mouse и RTC/ACPI также остаются отдельными
+ring-3 services с узкими hardware capabilities. Подробности — в
+[GUI.md](GUI.md).
+
+Shell и приложения общаются с
 `vafs.elf` отдельным FS-протоколом.
 VFS, в свою очередь, имеет только endpoint NVMe block service и приватные
 shared windows клиентов. Ядро не знает `ls`, path, extent или имя файла.

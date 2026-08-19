@@ -12,7 +12,8 @@ filesystem protocol или shell policy. При создании драйвер�
 4. запускает процесс без IOPL и без user-доступа к HHDM.
 
 Init сам не владеет hardware handles. Он просит запустить ELF по имени, а
-точечная policy procd не позволяет выдать VGA capability произвольной программе.
+точечная policy procd не позволяет выдать VGA/framebuffer capability
+произвольной программе.
 
 ## Keyboard driver
 
@@ -45,7 +46,7 @@ PageUp/PageDown, Delete/Insert и F1..F10. Событие хранит key в м
 а модификаторы — в старших. Compose, Unicode и несколько layouts должны
 появиться отдельным input service слоем.
 
-## VGA terminal driver
+## Compatibility VGA и terminal model
 
 `terminal.elf` получает:
 
@@ -65,7 +66,11 @@ backspace, `READLINE`, raw `READKEY` и проверенный абсолютн�
 цветных cells за IPC. VEdit использует raw/draw, но VGA capability не получает.
 Между запросами terminal сохраняет до 64 key events в кольцевой очереди; при
 переполнении удаляет самый старый autorepeat, сохраняя свежий Ctrl+C/F10.
-Hardware VGA cursor ports пока не нужны. После
+В VBE mode legacy aperture может не читаться обратно, поэтому cell строится из
+исходных character/attribute bytes, а VGA служит только best-effort mirror.
+Hardware VGA cursor ports пока не нужны. Одновременно terminal пересылает
+изменённые cells в `gui.elf`: это позволяет одному и тому же shell/VEdit/FASM
+работать в graphical window без второго line discipline. После
 старта `SYS_LOG` остаётся только debugcon-интерфейсом: kernel diagnostics не
 портят пользовательский экран.
 
@@ -77,8 +82,50 @@ flowchart LR
     E["edit.elf"] -->|"READKEY / DRAW"| T
     T -->|"Ctrl+C"| SD["sessiond"]
     SD -->|"PROCESS_KILL foreground"| KERNEL["microkernel"]
-    T -->|"MMIO mapping"| V["VGA text page"]
+    T -->|"compatibility MMIO"| V["VGA text page"]
+    T -->|"cell IPC"| G["gui.elf / VBE window"]
 ```
+
+## VBE video service и compositor
+
+BIOS выбирает 32-bpp direct-colour VBE linear framebuffer до 1280×800 до
+перехода в long mode. Kernel сохраняет geometry и создаёт точную MMIO
+capability, а procd выдаёт её только `gui.elf`:
+
+| Handle GUI | Тип | Объект | Права |
+|---:|---|---|---|
+| 1 | Endpoint | inbox | `SEND|RECV` |
+| 2 | Endpoint | nameserver | `SEND` |
+| 3 | MMIO | VBE linear framebuffer | `MAP|READ|WRITE` |
+
+`gui.elf` валидирует width/height/pitch/bpp через `PLATFORM_INFO`, отображает
+MMIO в `0x50000000` и выполняет rasterization на CPU. Desktop, gterm и обычные
+приложения видят только versioned `gui.vlib` endpoint. Таким образом video
+driver, compositor, window manager и UI renderer пока объединены одним
+изолированным сервисом, но не находятся в ring 0 и не размножаются по address
+spaces. Архитектура и API описаны в [GUI.md](GUI.md).
+
+## PS/2 mouse driver
+
+`mouse.elf` получает inbox/nameserver, IRQ12 и I/O range `0x60…0x64`. Он
+настраивает auxiliary port, проверяет ACK, синхронизирует трёхбайтовые packets
+по обязательному биту 3 и передаёт GUI только `dx`, инвертированный `dy` и
+buttons. Все ожидания инициализации имеют конечный budget: неисправное
+устройство завершает driver, а не зависает с выключенным планировщиком.
+
+На некоторых QEMU display backends IRQ12 после VBE switch не приходит. До
+общего kernel wait-set `IRQ + timeout` driver использует кооперативный status
+poll: читает только байты с признаком AUX и вызывает `YIELD`, если данных нет.
+IRQ12 gate/router и capability уже готовы, поэтому fallback можно убрать без
+изменения публичного GUI pointer protocol.
+
+## RTC и выключение
+
+`platform.elf` — отдельный сервис, а не часть compositor. Он получает I/O
+capabilities только на CMOS `0x70…0x71` и ACPI PM `0x604…0x607`, переводит BCD и
+12-hour RTC в `hour/minute`, публикует время GUI и выполняет power-off request.
+GUI не может обращаться к произвольным портам, а platform driver не получает
+framebuffer.
 
 ## Как добавить ещё один legacy-драйвер
 

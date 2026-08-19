@@ -14,6 +14,11 @@ IO_CAP      = 5
 VGA_CAP     = 6
 PCI_IO_CAP  = 7
 DMA_POOL_CAP = 8
+FRAMEBUFFER_CAP = 9
+IRQ12_CAP      = 10
+MOUSE_IO_CAP   = 11
+RTC_IO_CAP     = 12
+ACPI_IO_CAP    = 13
 DISK_IMAGE_VA = 0x0000000066000000
 DISK_IMAGE_MAX = 64*PAGE_SIZE
 
@@ -31,7 +36,7 @@ start:
   mov edi, BOOTFS_CAP
   syscall
   test rax, rax
-  js fatal
+  js .bootfs_failed
   mov [bootfs_base], rax
   mov [bootfs_size], rdx
 
@@ -40,7 +45,7 @@ start:
   ;// configuration space. Такая точечная policy пока живёт в procd; позже её вынесет devmgr.
   call pci_prepare_nvme
   test rax, rax
-  js fatal
+  js .pci_failed
   mov [nvme_mmio_cap], rax
 
   ;// Bootstrap policy: единственный особый запрос procd — запустить init и
@@ -49,7 +54,7 @@ start:
   mov esi, init_name.size
   call bootfs_find
   test rax, rax
-  jz fatal
+  jz .init_missing
   mov rdi, rax
   mov rsi, rdx
   mov edx, CONTROL_EP
@@ -60,7 +65,7 @@ start:
   mov qword [policy_extra3_rights], 0
   call load_program
   test rax, rax
-  js fatal
+  js .init_load_failed
   mov rdi, rax
   call close_handle
   mov rdi, rdx
@@ -124,6 +129,70 @@ start:
   jmp .load_requested
 
   .keyboard_policy:
+  cmp r12, gui_name.size
+  jne .mouse_policy
+  lea rdi, [ipc_request+IpcMessage.words+8]
+  lea rsi, [gui_name]
+  mov edx, gui_name.size
+  call bytes_equal
+  test eax, eax
+  jz .mouse_policy
+  xor edx, edx
+  xor ecx, ecx
+  cmp qword [ipc_request+IpcMessage.cap_count], 2
+  jb .gui_framebuffer
+  mov rdx, qword [ipc_request+IpcMessage.caps+IpcCap.bytes+IpcCap.handle]
+  mov rcx, qword [ipc_request+IpcMessage.caps+IpcCap.bytes+IpcCap.rights]
+  .gui_framebuffer:
+  mov r8d, FRAMEBUFFER_CAP
+  mov r9d, CAP_MAP+CAP_READ+CAP_WRITE
+  jmp .load_requested
+
+  .mouse_policy:
+  cmp r12, mouse_name.size
+  jne .platform_policy
+  lea rdi, [ipc_request+IpcMessage.words+8]
+  lea rsi, [mouse_name]
+  mov edx, mouse_name.size
+  call bytes_equal
+  test eax, eax
+  jz .platform_policy
+  xor edx, edx
+  xor ecx, ecx
+  cmp qword [ipc_request+IpcMessage.cap_count], 2
+  jb .mouse_devices
+  mov rdx, qword [ipc_request+IpcMessage.caps+IpcCap.bytes+IpcCap.handle]
+  mov rcx, qword [ipc_request+IpcMessage.caps+IpcCap.bytes+IpcCap.rights]
+  .mouse_devices:
+  mov r8d, IRQ12_CAP
+  mov r9d, CAP_WAIT
+  mov qword [policy_extra3], MOUSE_IO_CAP
+  mov qword [policy_extra3_rights], CAP_READ+CAP_WRITE
+  jmp .load_requested
+
+  .platform_policy:
+  cmp r12, platform_name.size
+  jne .keyboard_device_policy
+  lea rdi, [ipc_request+IpcMessage.words+8]
+  lea rsi, [platform_name]
+  mov edx, platform_name.size
+  call bytes_equal
+  test eax, eax
+  jz .keyboard_device_policy
+  xor edx, edx
+  xor ecx, ecx
+  cmp qword [ipc_request+IpcMessage.cap_count], 2
+  jb .platform_devices
+  mov rdx, qword [ipc_request+IpcMessage.caps+IpcCap.bytes+IpcCap.handle]
+  mov rcx, qword [ipc_request+IpcMessage.caps+IpcCap.bytes+IpcCap.rights]
+  .platform_devices:
+  mov r8d, RTC_IO_CAP
+  mov r9d, CAP_READ+CAP_WRITE
+  mov qword [policy_extra3], ACPI_IO_CAP
+  mov qword [policy_extra3_rights], CAP_WRITE
+  jmp .load_requested
+
+  .keyboard_device_policy:
   cmp r12, keyboard_name.size
   jne .terminal_policy
   lea rdi, [ipc_request+IpcMessage.words+8]
@@ -238,6 +307,19 @@ start:
   mov rax, CAP_SEND+CAP_MOVE
   mov qword [response+IpcMessage.caps+IpcCap.bytes+IpcCap.rights], rax
   jmp .reply
+
+.bootfs_failed:
+  log bootfs_failed_text, bootfs_failed_text.size
+  jmp fatal
+.pci_failed:
+  log pci_failed_text, pci_failed_text.size
+  jmp fatal
+.init_missing:
+  log init_missing_text, init_missing_text.size
+  jmp fatal
+.init_load_failed:
+  log init_load_failed_text, init_load_failed_text.size
+  jmp fatal
 
   ;// Дисковый ELF приходит не копией в IPC, а read-only shared object.
   ;// load_program использует тот же строгий валидатор, что и initramfs.
@@ -1183,6 +1265,14 @@ ready_text db "procd: init started; process service ready", 10
 .size = $-ready_text
 fatal_text db "procd: fatal bootstrap or IPC error", 10
 .size = $-fatal_text
+bootfs_failed_text db "procd: bootstrap failed at BOOTFS_INFO", 10
+.size = $-bootfs_failed_text
+pci_failed_text db "procd: bootstrap failed at NVMe PCI policy", 10
+.size = $-pci_failed_text
+init_missing_text db "procd: bootstrap failed: init.elf missing", 10
+.size = $-init_missing_text
+init_load_failed_text db "procd: bootstrap failed while loading init.elf", 10
+.size = $-init_load_failed_text
 image_map_error_text db "procd: cannot map disk ELF shared window", 10
 .size = $-image_map_error_text
 image_bad_handle_text db "procd: disk ELF capability is not a readable shared object", 10
@@ -1203,6 +1293,12 @@ nvme_name db "nvme.elf"
 .size = $-nvme_name
 vafs_name db "vafs.elf"
 .size = $-vafs_name
+gui_name db "gui.elf"
+.size = $-gui_name
+mouse_name db "mouse.elf"
+.size = $-mouse_name
+platform_name db "platform.elf"
+.size = $-platform_name
 shm_sender_name db "shm_sender.elf"
 .size = $-shm_sender_name
 

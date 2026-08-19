@@ -35,6 +35,7 @@ SYS_IO_WRITE32      = 30
 SYS_MMIO_CREATE     = 31
 SYS_DMA_CREATE      = 32
 SYS_SHARED_UNMAP    = 33
+SYS_PLATFORM_INFO   = 34
 
 ERR_NOENT = -2
 ERR_BAD_HANDLE = -9
@@ -1133,6 +1134,8 @@ function syscall_dispatch
   je .dma_create
   cmp rax, SYS_SHARED_UNMAP
   je .shared_unmap
+  cmp rax, SYS_PLATFORM_INFO
+  je .platform_info
   mov qword [r12+Context.rax], ERR_NOSYS
   jmp .resume_current
 
@@ -1160,6 +1163,27 @@ function syscall_dispatch
   .memory_info:
   mov rax, [pmm_free_count]
   mov [r12+Context.rax], rax
+  jmp .resume_current
+
+  ;// Публичная геометрия загрузочного framebuffer. Физический адрес намеренно
+  ;// не раскрывается: драйвер получает его только внутри CAP_MMIO.
+  .platform_info:
+  mov eax, dword [HHDM.base+VBE.bootInfo+VBE.Boot.magic]
+  cmp eax, VBE.magic
+  jne .platform_missing
+  mov eax, dword [HHDM.base+VBE.bootInfo+VBE.Boot.height]
+  shl rax, 32
+  mov edx, dword [HHDM.base+VBE.bootInfo+VBE.Boot.width]
+  or rax, rdx
+  mov [r12+Context.rax], rax       ;// low32=width, high32=height
+  mov eax, dword [HHDM.base+VBE.bootInfo+VBE.Boot.bpp]
+  shl rax, 32
+  mov edx, dword [HHDM.base+VBE.bootInfo+VBE.Boot.pitch]
+  or rax, rdx
+  mov [r12+Context.rdx], rax       ;// low32=pitch, high32=bpp
+  jmp .resume_current
+  .platform_missing:
+  mov qword [r12+Context.rax], ERR_NOENT
   jmp .resume_current
 
   .endpoint_create:

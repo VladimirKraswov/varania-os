@@ -20,7 +20,7 @@ if ! command -v "$QEMU_BIN" >/dev/null 2>&1; then
   exit 1
 fi
 
-# На Retina-экране исходный VGA mode выглядит физически очень маленьким.
+# На Retina-экране гостевой VBE framebuffer без host scaling выглядит мелким.
 # Cocoa умеет масштабировать framebuffer без изменения гостевой ОС. По
 # умолчанию интерактивный запуск разворачивается на весь экран; значение 0
 # оставляет обычное resizable window с zoom-to-fit.

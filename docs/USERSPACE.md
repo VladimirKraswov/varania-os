@@ -87,13 +87,19 @@ PIE, `PT_INTERP`, relocations, shared libraries и demand paging executable по
 | 6 | VGA MMIO page `0xB8000` | `MAP|READ|WRITE` |
 | 7 | PCI config ports `0xCF8..0xCFF` | `READ|WRITE` |
 | 8 | DMA pool factory | `CREATE` |
+| 9 | VBE linear framebuffer MMIO | `MAP|READ|WRITE` |
+| 10 | IRQ12 | `WAIT` |
+| 11 | mouse ports `0x60..0x64` | `READ|WRITE` |
+| 12 | RTC ports `0x70..0x71` | `READ|WRITE` |
+| 13 | ACPI PM ports `0x604..0x607` | `WRITE` |
 
 Procd передаёт init свой inbox как handle 1 и ослабленный control endpoint как
 handle 2. Каждый последующий процесс также получает собственный endpoint как
 handle 1. Дополнительные grants идут с handle 2 в порядке `ThreadConfig`.
 
-IRQ1 уникален: при создании keyboard driver он перемещается из procd. VGA
-capability выдаётся только `terminal.elf`. Procd сканирует PCI config, создаёт
+IRQ1/IRQ12 уникальны: при создании input drivers они перемещаются из procd. VGA
+capability выдаётся только `terminal.elf`, framebuffer — только `gui.elf`,
+RTC/ACPI — только `platform.elf`. Procd сканирует PCI config, создаёт
 capability только на найденный BAR NVMe и передаёт её вместе с отдельным DMA
 allocator процессу `nvme.elf`. Ни init, ни nameserver, ни shell не владеют
 hardware capabilities.
@@ -150,8 +156,10 @@ Nameserver хранит ABI version рядом с endpoint. `REGISTER.words[2]=0
 capability libraries, описанных в [LIBRARIES.md](LIBRARIES.md).
 
 Особые grants задаёт bootstrap policy procd, а не запрашивающий процесс:
-keyboard получает nameserver/IRQ/I/O, terminal — nameserver/VGA MMIO,
-NVMe — BAR/DMA, VFS — nameserver/`CREATE`, а `shm_sender` — `CREATE`.
+keyboard получает nameserver/IRQ1/I/O, mouse — nameserver/IRQ12/I/O,
+terminal — nameserver/VGA MMIO, GUI — nameserver/framebuffer MMIO, platform —
+nameserver/RTC/ACPI, NVMe — BAR/DMA, VFS — nameserver/`CREATE`, а `shm_sender` —
+`CREATE`.
 Получатель shared memory
 не получает system capability: sender передаёт ему только ослабленный
 `MAP|READ|WRITE` handle обычным endpoint IPC.
@@ -159,8 +167,8 @@ NVMe — BAR/DMA, VFS — nameserver/`CREATE`, а `shm_sender` — `CREATE`.
 ## Init, nameserver и сервисы
 
 Init сначала запускает nameserver и изолированные integration-процессы. После
-успеха self-tests он создаёт sessiond, terminal, NVMe, VaraniaFS, keyboard
-driver и shell. Каждому
+успеха self-tests он создаёт sessiond, GUI, platform, terminal, NVMe,
+VaraniaFS, mouse, keyboard driver и shell. Каждому
 из них init передаёт только `CAP_SEND` к endpoint nameserver; hardware grants
 добавляет policy procd.
 
@@ -215,7 +223,9 @@ message db "hello from ring 3", 10
 - `lifecycle_child.elf`: status 37 и сравнение PMM frame count после teardown;
 - `service/client/nameserver`: endpoint queue и capability transfer;
 - `keyboard.elf`: реальный IRQ1, отправляемый тестом через QMP;
-- `terminal/vafs/nvme/shell`: key events, persistent FS lifecycle и VGA page;
+- `terminal/vafs/nvme/shell`: key events, persistent FS lifecycle и VBE mirror;
+- `gui/mouse/platform/desktop/gterm`: VBE 1280×800, wallpaper, pointer events,
+  clock, launch и полный lifecycle window controls;
 - `cap_revoke_test.elf`: цепочка из двух descendants и сохранение root;
 - `supervisor.elf`: kill blocked target и два restart завершившегося worker;
 - `sessiond.elf`: стек foreground CONTROL; terminal Ctrl+C будит shell через kill;

@@ -49,6 +49,23 @@ SMAP.size    = 1024                         ;// Размер буфера кар
 SMAP.count   = SMAP.base                    ;// [0..3] - количество записей E820
 SMAP.entries = SMAP.base+4                  ;// [4..]  - записи E820 (24 байта)
 
+;// BIOS VBE заполняет эти три области до перехода в long mode. Они лежат
+;// сразу после E820-буфера и ниже стека stage 2, поэтому остаются доступны
+;// ядру через HHDM, но никогда не попадают в PMM.
+VBE.controllerInfo = 0x0A00                 ;// VbeInfoBlock, 512 bytes
+VBE.modeInfo       = 0x0C00                 ;// ModeInfoBlock, 256 bytes
+VBE.bootInfo       = 0x0D00                 ;// компактный стабильный ABI Varania
+VBE.magic          = 0x32454256             ;// "VBE2" little-endian
+VBE.Boot.magic     = 0
+VBE.Boot.mode      = 4
+VBE.Boot.width     = 8
+VBE.Boot.height    = 12
+VBE.Boot.pitch     = 16
+VBE.Boot.bpp       = 20
+VBE.Boot.physical  = 24
+VBE.Boot.pages     = 32
+VBE.Boot.bytes     = 40
+
 ;//// Продолжение загрузчика (этап 2, 4 KiB).
 ;//// 16-битный код - в начале страницы, 32-битный код - на смещении
 ;//// BOOT2.pm32 (физ. адрес 0x1800), 64-битный трамплин - в конце

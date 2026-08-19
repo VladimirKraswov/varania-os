@@ -78,6 +78,11 @@ start:
   call strings_equal
   test eax, eax
   jnz .clear
+  lea rdi, [line_buffer]
+  lea rsi, [cmd_desktop]
+  call strings_equal
+  test eax, eax
+  jnz .desktop
 
   lea rdi, [line_buffer]
   lea rsi, [prefix_cd]
@@ -139,6 +144,9 @@ start:
   jmp .prompt
 .clear:
   call terminal_clear
+  jmp .prompt
+.desktop:
+  call command_desktop
   jmp .prompt
 .cd:
   lea rsi, [line_buffer+3]
@@ -806,6 +814,28 @@ command_edit:
   pop rbx
   ret
 
+;// Запустить desktop из /bin независимо от текущего каталога. Тот же ELF64
+;// loader и supervisor используются для text и graphical программ.
+command_desktop:
+  push rbx
+  mov rbx, [current_node]
+  mov qword [current_node], 0
+  mov edi, FS_LOOKUP
+  lea rsi, [bin_name]
+  call fs_named_request
+  test rax, rax
+  jnz .restore
+  cmp qword [ipc_reply+IpcMessage.words+16], FS_NODE_DIR
+  jne .restore
+  mov rax, qword [ipc_reply+IpcMessage.words+8]
+  mov [current_node], rax
+  lea rsi, [desktop_command]
+  call command_run
+.restore:
+  mov [current_node], rbx
+  pop rbx
+  ret
+
 ;// RSI=name. Смена каталога выполняется через LOOKUP, а не через локальное
 ;// знание on-disk VaraniaFS. Это сохраняет команду при смене FS-драйвера.
 command_cd:
@@ -1092,7 +1122,7 @@ failed_text db "shell: fatal service or IPC error", 10
 shell_ready db "Shell is ready. Type 'help' for commands.", 10, 10, 0
 prompt_prefix db "varania:", 0
 prompt_suffix db "$ ", 0
-help_text db "Commands: ls, cd, mkdir, touch, cat, write, append, edit, run, pwd, clear, help", 10, 0
+help_text db "Commands: desktop, ls, cd, mkdir, touch, cat, write, append, edit, run, pwd, clear, help", 10, 0
 unknown_text db "Unknown command. Type 'help'.", 10, 0
 fs_error_text db "Filesystem operation failed.", 10, 0
 not_dir_text db "cd: target is not a directory.", 10, 0
@@ -1111,6 +1141,7 @@ cmd_help db "help", 0
 cmd_ls db "ls", 0
 cmd_pwd db "pwd", 0
 cmd_clear db "clear", 0
+cmd_desktop db "desktop", 0
 prefix_cd db "cd ", 0
 prefix_mkdir db "mkdir ", 0
 prefix_touch db "touch ", 0
@@ -1122,6 +1153,7 @@ prefix_run db "run ", 0
 edit_argv0 db "edit.elf ", 0
 .size = $-edit_argv0-1
 bin_name db "bin", 0
+desktop_command db "desktop.elf",0
 
 align 8
 terminal_endpoint dq 0

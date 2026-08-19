@@ -8,7 +8,7 @@ include "abi.inc"
 ;// во время исполнения, но исполняемый код и состояние остаются изолированы.
 
 SELF_EP = 1
-SERVICE_MAX = 8
+SERVICE_MAX = 12
 
 segment readable executable
 start:

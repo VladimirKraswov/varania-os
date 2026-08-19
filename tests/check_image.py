@@ -18,16 +18,25 @@ DISK_ELFS = {
     "edit.elf": ROOT / "build" / "disk" / "edit.elf",
     "sysinfo.elf": ROOT / "build" / "disk" / "sysinfo.elf",
     "hang.elf": ROOT / "build" / "disk" / "hang.elf",
+    "desktop.elf": ROOT / "build" / "disk" / "desktop.elf",
+    "gterm.elf": ROOT / "build" / "disk" / "gterm.elf",
+    "guidemo.elf": ROOT / "build" / "disk" / "guidemo.elf",
     "fasm.elf": ROOT / "build" / "disk" / "fasm.elf",
 }
 SYSTEM_LIBRARY_FILES = (
     ROOT / "build/sysroot/root/system/lib/runtime.inc",
     ROOT / "build/sysroot/root/system/lib/session.inc",
+    ROOT / "build/sysroot/root/system/lib/gui.inc",
     ROOT / "build/sysroot/root/system/lib/services/terminal.vlib",
     ROOT / "build/sysroot/root/system/lib/services/filesystem.vlib",
     ROOT / "build/sysroot/root/system/lib/services/process.vlib",
     ROOT / "build/sysroot/root/system/lib/services/session.vlib",
+    ROOT / "build/sysroot/root/system/lib/services/gui.vlib",
+    ROOT / "build/sysroot/root/system/assets/wallpapers/varania-default.png",
+    ROOT / "build/sysroot/root/system/assets/wallpapers/varania-default.bgra",
     ROOT / "build/sysroot/root/system/templates/minimal.asm",
+    ROOT / "build/sysroot/root/system/templates/gui.asm",
+    ROOT / "build/sysroot/root/system/ui.asm",
 )
 FASM_SHA256 = "a34dec7d0bc2dc79faabb68bd8bc2f62b6cfb31d69c01449367ce4cd8098934e"
 INITRAMFS_SIZE = 192 * 1024
@@ -45,7 +54,10 @@ EXPECTED_PROGRAMS = {
     "service.elf",
     "client.elf",
     "sessiond.elf",
+    "gui.elf",
+    "platform.elf",
     "terminal.elf",
+    "mouse.elf",
     "keyboard.elf",
     "nvme.elf",
     "vafs.elf",

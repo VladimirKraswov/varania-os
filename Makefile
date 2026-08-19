@@ -16,13 +16,13 @@ VAFS_BOOT_UUID := 56415241-4e49-4146-5300-000000000000
 VAFS_UUID    := 56415241-4e49-4146-5300-000000000001
 
 USER_BUILD := build/user
-USER_PROGRAMS := procd init nameserver service client sessiond terminal keyboard nvme vafs shell \
+USER_PROGRAMS := procd init nameserver service client sessiond gui platform terminal mouse keyboard nvme vafs shell \
 		 memory_test isolation_test \
 		 lifecycle_child cap_revoke_test supervisor kill_target restart_worker \
 		 shm_receiver shm_sender
 USER_ELFS := $(addprefix $(USER_BUILD)/,$(addsuffix .elf,$(USER_PROGRAMS)))
 DISK_BUILD := build/disk
-DISK_PROGRAMS := hello edit sysinfo hang
+DISK_PROGRAMS := hello edit sysinfo hang desktop gterm guidemo
 DISK_ELFS := $(addprefix $(DISK_BUILD)/,$(addsuffix .elf,$(DISK_PROGRAMS)))
 FASM_SOURCE_STAMP := build/fasm-source/.stamp
 FASM_GUEST_ELF := $(DISK_BUILD)/fasm.elf
@@ -36,7 +36,8 @@ SYSROOT_INPUTS := Makefile README.md $(shell find src docs scripts system -type 
 	tools/fasm/fasm-1.73.35.tgz tools/vafs/vafs.py
 
 .PHONY: all build check smoke test-capabilities test-isolation test-lifecycle \
-	test-revoke test-supervisor test-shared test-shell test-editor test-vafs test run debug clean help
+	test-revoke test-supervisor test-shared test-shell test-editor test-gui \
+	test-vafs test run debug clean help
 
 all: build
 
@@ -140,10 +141,13 @@ test-shell: check
 test-editor: check
 	python3 tests/test_editor.py
 
+test-gui: check
+	python3 tests/test_gui.py
+
 test-vafs:
 	python3 tests/test_vafs.py
 
-test: test-vafs smoke test-capabilities test-isolation test-lifecycle test-revoke test-supervisor test-shared test-shell test-editor
+test: test-vafs smoke test-capabilities test-isolation test-lifecycle test-revoke test-supervisor test-shared test-shell test-editor test-gui
 
 run: check
 	$(QEMU_RUNNER)
@@ -169,6 +173,7 @@ help:
 	  'make test-shared — проверить межпроцессную shared memory и IPC' \
 	  'make test-shell — проверить persistent VaraniaFS/NVMe через shell и VGA' \
 	  'make test-editor — проверить VEdit, libvarania, FASM build/run и подсветку' \
+	  'make test-gui — проверить VBE, мышь, desktop, wallpaper и оконный менеджер' \
 	  'make test-vafs — проверить COW, CRC32C, B+-tree и recovery VaraniaFS' \
 	  'make debug  — QEMU с журналом прерываний/ошибок' \
 	  'make clean  — удалить только создаваемые сборкой файлы'

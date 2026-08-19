@@ -52,6 +52,7 @@
 | 31 | `MMIO_CREATE` | `system_cap`, `physical`, `pages` | MMIO capability |
 | 32 | `DMA_CREATE` | `dma_pool_cap`, `pages` | contiguous shared cap, physical в `RDX` |
 | 33 | `SHARED_UNMAP` | `virtual` | удалить целое shared mapping по base |
+| 34 | `PLATFORM_INFO` | — | width/height в `RAX`, pitch/bpp в `RDX` |
 
 Основные errno: `-2` no entry, `-9` bad capability, `-11` queue/full slots,
 `-12` no memory, `-14` bad user pointer, `-16` busy, `-22` invalid argument,
@@ -129,8 +130,9 @@ space. Unmap удаляет все PTE объекта, снимает mapping-с
 `MMIO_MAP` принимает page-aligned user address и capability типа MMIO с
 `MAP|READ|WRITE`. x86-64 не имеет write-only PTE, поэтому права явно отражают
 фактическую возможность чтения. Физический адрес находится внутри capability
-и не передаётся user process аргументом. Сейчас bootstrap policy создаёт одну
-capability — VGA text page `0xB8000` для `terminal.elf`. Mapping получает
+и не передаётся user process аргументом. Bootstrap policy создаёт отдельные
+capabilities для VGA text page `terminal.elf`, VBE framebuffer `gui.elf` и PCI
+BAR `nvme.elf`. Mapping получает
 `USER|RW|NX|BORROWED`: teardown удаляет page tables, но не пытается вернуть
 device pages в PMM. Повторное отображение занятого диапазона даёт `-16`.
 
@@ -140,6 +142,11 @@ device pages в PMM. Повторное отображение занятого 
 `CAP_DMA_POOL`, выделяет физически непрерывные frames и возвращает и shared
 object, и physical base. Именно так `procd` ограничивает NVMe-драйвер BAR-ом и
 DMA allocator, не передавая ему root capability.
+
+`PLATFORM_INFO` не раскрывает physical framebuffer address. При корректном VBE
+boot info младшие/старшие 32 бита `RAX` содержат width/height, а `RDX` —
+pitch/bpp. Без графического режима вызов возвращает `-2`. Отдельная MMIO
+capability остаётся единственным полномочием на отображение framebuffer.
 
 ## Создание thread
 

@@ -156,7 +156,8 @@ GOP/font service.
 
 ## Проверка
 
-`tests/test_shell.py` вводит настоящие key events через QMP, читает VGA memory,
+`tests/test_shell.py` вводит настоящие key events через QMP, сравнивает VBE
+framebuffer до/после команд,
 делает `cat` существующего системного файла, запускает disk-only ELF, собирает
 новый ELF системным FASM, выполняет его, затем создаёт `/demo/note` двумя
 streaming writes (`hel` + `lo`) и останавливает VM. После остановки host CLI обязан:

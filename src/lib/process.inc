@@ -17,11 +17,12 @@ vlib_process_connect:
 .done:
   ret
 
-;// Синхронно запустить ELF64 из VaraniaFS.
-;// RDI=executable path, RSI=полная command line; RAX=exit status/error.
+;// Асинхронно запустить ELF64 из VaraniaFS.
+;// RDI=executable path, RSI=полная command line.
+;// RAX=process capability/error, RDX=child endpoint capability.
 ;// ELF и argv разделяют VFS shared window, поэтому длина argv не ограничена
 ;// шестью IPC words. Procd получает только MAP|READ capability.
-vlib_process_run:
+vlib_process_spawn:
   push rbx
   push r12
   push r13
@@ -107,6 +108,39 @@ vlib_process_run:
   jne .protocol
   mov r12, qword [vlib_reply+IpcMessage.caps+IpcCap.handle]
   mov r13, qword [vlib_reply+IpcMessage.caps+IpcCap.bytes+IpcCap.handle]
+  mov rax, r12
+  mov rdx, r13
+  jmp .done
+.invalid:
+  mov rax, VLIB_ERR_INVALID
+  jmp .done
+.too_large:
+  mov rax, VLIB_ERR_TOO_LONG
+  jmp .done
+.io_error:
+  mov rax, VLIB_ERR_IO
+  jmp .done
+.protocol:
+  mov rax, VLIB_ERR_PROTOCOL
+.done:
+  add rsp, 8
+  pop r15
+  pop r14
+  pop r13
+  pop r12
+  pop rbx
+  ret
+
+;// Синхронная удобная обёртка сохраняет прежний ABI. GUI launcher использует
+;// spawn, чтобы одновременно ждать window events и управлять дочерним shell.
+vlib_process_run:
+  push r12
+  push r13
+  call vlib_process_spawn
+  test rax, rax
+  js .done
+  mov r12, rax
+  mov r13, rdx
   mov rdi, r12
   call vlib_session_push_foreground
   test rax, rax
@@ -133,22 +167,7 @@ vlib_process_run:
   call vlib_close
   mov rax, VLIB_ERR_IO
   jmp .done
-.invalid:
-  mov rax, VLIB_ERR_INVALID
-  jmp .done
-.too_large:
-  mov rax, VLIB_ERR_TOO_LONG
-  jmp .done
-.io_error:
-  mov rax, VLIB_ERR_IO
-  jmp .done
-.protocol:
-  mov rax, VLIB_ERR_PROTOCOL
 .done:
-  add rsp, 8
-  pop r15
-  pop r14
   pop r13
   pop r12
-  pop rbx
   ret

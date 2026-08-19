@@ -20,7 +20,10 @@ VAFS_IO_VA = 0x0000000062000000
 MAX_ENTRIES   = 512
 MAX_PATH      = 1024
 MAX_NAME      = 47              ;// 48 IPC bytes, последний байт нужен для NUL
-SESSION_MAX   = 4
+;// Desktop, compositor, terminal windows и developer tools одновременно
+;// держат streaming windows. 16 сессий занимают максимум 4 MiB RAM и хорошо
+;// укладываются в минимальные 128 MiB, не возвращая систему к лимитам 1990-х.
+SESSION_MAX   = 16
 FS_BUFFER_PAGES = 64
 FS_BUFFER_BYTES = FS_BUFFER_PAGES*PAGE_SIZE
 FS_BUFFER_BASE  = 0x0000000063000000

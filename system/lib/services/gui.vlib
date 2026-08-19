@@ -1,0 +1,10 @@
+VLIB01
+name=gui
+service=7
+abi=1
+transport=ipc-capability
+interface=/system/lib/gui.inc
+implementation=user-space-compositor
+components=button,radio,toggle,checkbox,textEdit,scrollView,listView,tabs,panel,iconButton,label,image
+events=owner-scoped-reply-capability
+lifecycle=client-close-cleans-server-state

@@ -1,5 +1,5 @@
 ;//////////////////////////////////////////////////////////////////////////////
-;// libvarania umbrella: base + IPC + terminal + VFS + session + process
+;// libvarania umbrella: base + IPC + terminal + VFS + session + process + GUI
 ;//////////////////////////////////////////////////////////////////////////////
 ;
 ;// До include этого файла программа должна include user/abi.inc. Публичные
@@ -12,6 +12,7 @@ include "terminal.inc"
 include "vfs.inc"
 include "session.inc"
 include "process.inc"
+include "gui.inc"
 
 segment readable executable
 
@@ -31,6 +32,7 @@ vlib_initialize:
   ret
 
 vlib_shutdown:
+  call vlib_gui_disconnect
   call vlib_fs_disconnect
   ret
 
@@ -40,6 +42,7 @@ vlib_terminal_endpoint dq 0
 vlib_fs_endpoint dq 0
 vlib_process_endpoint dq 0
 vlib_session_endpoint dq 0
+vlib_gui_endpoint dq 0
 vlib_fs_buffer_cap dq 0
 vlib_path_component rb 48
 vlib_path_work rb VLIB_PATH_MAX+1

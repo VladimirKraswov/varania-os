@@ -28,15 +28,18 @@ linker, чистые RX-модули можно будет дополнител�
 /bin/fasm.elf                    системный FASM 1.73.35
 /bin/hello.elf                   минимальный disk-only ELF
 /bin/sysinfo.elf                 пример libvarania и сведения о памяти
+/bin/guidemo.elf                 пример server-side widgets и action events
 /system/lib/base.inc             память и строки
 /system/lib/ipc.inc              IPC, backpressure, vlib_open
 /system/lib/terminal.inc         terminal.vlib ABI 1
 /system/lib/vfs.inc              filesystem.vlib ABI 1
 /system/lib/session.inc          foreground/session.vlib ABI 1
 /system/lib/process.inc          process.vlib ABI 1
+/system/lib/gui.inc              gui.vlib ABI 1, widgets/events/desktop
 /system/lib/runtime.inc          umbrella include
 /system/lib/services/*.vlib      читаемые manifests контрактов
 /system/templates/minimal.asm    шаблон минимальной программы
+/system/templates/gui.asm        минимальное событийное GUI-приложение
 ```
 
 Те же файлы находятся в `src/lib` репозитория и импортируются в системный том.
@@ -80,10 +83,11 @@ reply.cap[0]    = ослабленный SEND endpoint
 |---|---|
 | `base.inc` | `vlib_zero`, `vlib_copy`, `vlib_string_length/copy` |
 | `ipc.inc` | `vlib_send_retry`, `vlib_open`, `vlib_close` |
-| `terminal.inc` | connect, clear, write, raw key, цветные VGA cells |
+| `terminal.inc` | connect, clear, write, raw key, цветные terminal cells |
 | `vfs.inc` | connect/detach, resolve/create/stat, streaming read/write |
 | `session.inc` | connect, push/pop foreground CONTROL capability |
-| `process.inc` | синхронный запуск ELF64 из VaraniaFS |
+| `process.inc` | асинхронный spawn и синхронный run ELF64 из VaraniaFS |
+| `gui.inc` | desktop/window lifecycle, shortcuts, widgets и semantic events |
 | `runtime.inc` | `vlib_initialize`, `vlib_shutdown` и все модули выше |
 
 Пример приложения:
@@ -110,6 +114,11 @@ start:
 сама режет поток на 256-KiB chunks. `vlib_process_run` читает ELF в то же shared
 window и размещает длинную command line после образа. Ни одна обёртка не знает
 on-disk формат VaraniaFS и не получает hardware capability.
+
+`gui.inc` особенно важен для границы «аналог DLL»: constructor записывает в
+IPC только id/type/geometry/state/text. Hit testing, состояние и rasterizer
+исполняются один раз в `gui.elf`. `vlib_ui_wait_event` получает action только
+widgets текущего sender token. Полный ABI и шаблон описаны в [GUI.md](GUI.md).
 
 ## Правила совместимости
 

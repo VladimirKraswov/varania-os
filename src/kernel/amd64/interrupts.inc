@@ -84,6 +84,7 @@ interrupts_init:
 
   install_idt_gate 0x20, irq_0
   install_idt_gate 0x21, irq_1
+  install_idt_gate 0x2C, irq_12
 
   lidt [idt_descriptor]
   call pic_init
@@ -196,6 +197,19 @@ irq_1:
   mov edi, 1
   call device_irq_notify
   mov edi, 0x21
+  call pic_send_eoi
+  pop_all_registers
+  iretq
+
+;// PS/2 mouse использует IRQ12 ведомого PIC. Как и IRQ1, линия one-shot:
+;// повторно открыть её может только драйвер своим SYS_IRQ_WAIT.
+irq_12:
+  push_all_registers
+  mov edi, 12
+  call pic_mask_irq
+  mov edi, 12
+  call device_irq_notify
+  mov edi, 0x2C
   call pic_send_eoi
   pop_all_registers
   iretq

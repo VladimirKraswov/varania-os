@@ -111,19 +111,33 @@ def type_command(qmp: QmpClient, command: str) -> None:
     qmp.hmp("sendkey ret 20")
 
 
-def read_vga(qmp: QmpClient, directory: Path) -> str:
-    """Считать 80x25 VGA text buffer и убрать байты атрибутов."""
-    dump = directory / "vga.bin"
-    monitor_output = qmp.hmp(f'pmemsave 0xb8000 4000 "{dump}"')
+def read_framebuffer(
+    qmp: QmpClient, directory: Path, name: str,
+) -> tuple[int, int, bytes]:
+    """Снять реальный VBE framebuffer, а не отключённую BIOS text aperture."""
+    dump = directory / f"{name}.ppm"
+    monitor_output = qmp.hmp(f'screendump "{dump}"')
     if not dump.exists():
-        raise RuntimeError(f"pmemsave не создал VGA dump: {monitor_output!r}")
+        raise RuntimeError(f"screendump не создал PPM: {monitor_output!r}")
     raw = dump.read_bytes()
-    if len(raw) != 4000:
-        raise RuntimeError(f"QEMU сохранил {len(raw)} вместо 4000 байт VGA")
-    characters = raw[0::2]
-    rows = [characters[index:index + 80].decode("ascii", errors="replace").rstrip()
-            for index in range(0, len(characters), 80)]
-    return "\n".join(rows)
+    parts = raw.split(b"\n", 3)
+    if len(parts) != 4 or parts[0] != b"P6" or parts[2] != b"255":
+        raise RuntimeError("некорректный binary PPM от QEMU")
+    width, height = map(int, parts[1].split())
+    pixels = parts[3]
+    if len(pixels) != width * height * 3:
+        raise RuntimeError("обрезан framebuffer screendump")
+    return width, height, pixels
+
+
+def changed_pixels(first: bytes, second: bytes) -> int:
+    """Посчитать pixels, изменившиеся между двумя RGB-кадрами."""
+    if len(first) != len(second):
+        raise RuntimeError("нельзя сравнить framebuffer разного размера")
+    return sum(
+        first[index:index + 3] != second[index:index + 3]
+        for index in range(0, len(first), 3)
+    )
 
 
 def main() -> None:
@@ -169,14 +183,18 @@ def main() -> None:
         client = connect_qmp(qmp_path, time.monotonic() + 3)
         wait_debug(process, captured, SHELL_READY, 1)
         wait_debug(process, captured, PROMPT_READY, 1)
+        width, height, initial_pixels = read_framebuffer(
+            client, temporary, "initial-console"
+        )
+        if (width, height) != (1280, 800):
+            raise AssertionError(f"ожидался VBE 1280x800, получен {width}x{height}")
 
         type_command(client, "ls")
         wait_debug(process, captured, LS_OK, 1)
         wait_debug(process, captured, PROMPT_READY, 2)
-        root_screen = read_vga(client, temporary)
-        for expected in ("Welcome to Varania OS", "system/"):
-            if expected not in root_screen:
-                raise AssertionError(f"на VGA после `ls` нет {expected!r}\n{root_screen}")
+        _, _, root_pixels = read_framebuffer(client, temporary, "root-ls")
+        if changed_pixels(initial_pixels, root_pixels) < 250:
+            raise AssertionError("`ls` не изменил видимый VBE framebuffer")
 
         type_command(client, "cd system")
         wait_debug(process, captured, CD_OK, 1)
@@ -209,8 +227,14 @@ def main() -> None:
         # загружает только что созданный ELF с того же тома.
         # Четыре запуска превышают SESSION_MAX без FS_DETACH (shell уже занял
         # первый slot), поэтому цикл одновременно проверяет возврат VFS window.
-        for compile_index in range(4):
-            type_command(client, "run fasm.elf /system/t.asm /system/build/t.elf")
+        compile_commands = [
+            "run fasm.elf /system/t.asm /system/build/t.elf",
+            "run fasm.elf /system/t.asm /system/build/t.elf",
+            "run fasm.elf /system/t.asm /system/build/t.elf",
+            "run fasm.elf /system/ui.asm /system/build/g.elf",
+        ]
+        for compile_index, compile_command in enumerate(compile_commands):
+            type_command(client, compile_command)
             wait_debug(process, captured, RUN_OK, 2 + compile_index)
             wait_debug(process, captured, PROMPT_READY, 10 + compile_index)
         type_command(client, "cd ..")
@@ -251,15 +275,17 @@ def main() -> None:
         type_command(client, "ls")
         wait_debug(process, captured, LS_OK, 2)
 
-        child_screen = read_vga(client, temporary)
-        for expected in ("varania:/demo$", "note"):
-            if expected not in child_screen:
-                raise AssertionError(f"на VGA после lifecycle VaraniaFS нет {expected!r}\n{child_screen}")
+        _, _, child_pixels = read_framebuffer(client, temporary, "demo-ls")
+        if changed_pixels(root_pixels, child_pixels) < 250:
+            raise AssertionError("VaraniaFS lifecycle не изменил видимый framebuffer")
     except (AssertionError, OSError, RuntimeError, TimeoutError) as error:
         if client is not None:
             try:
-                print("\n--- VGA snapshot ---")
-                print(read_vga(client, temporary))
+                read_framebuffer(client, temporary, "failure")
+                print(f"\nFramebuffer snapshot: {temporary / 'failure.ppm'}")
+                preserved = os.environ.get("VARANIA_TEST_FAILURE_SCREENSHOT")
+                if preserved:
+                    shutil.copyfile(temporary / "failure.ppm", preserved)
             except (OSError, RuntimeError):
                 pass
         print(bytes(captured).decode("utf-8", errors="replace"), end="")
@@ -306,17 +332,30 @@ def main() -> None:
     )
     guest_image = guest_elf.read_bytes() if get_guest_elf.returncode == 0 else b""
     guest_elf.unlink(missing_ok=True)
+    gui_elf_fd, gui_elf_name = tempfile.mkstemp(prefix="varania-gui-template-", dir="/tmp")
+    os.close(gui_elf_fd)
+    gui_elf = Path(gui_elf_name)
+    get_gui_elf = subprocess.run(
+        [sys.executable, str(ROOT / "tools/vafs/vafs.py"), "get",
+         str(NVME_IMAGE), "/system/build/g.elf", str(gui_elf)],
+        capture_output=True, text=True, check=False,
+    )
+    gui_image = gui_elf.read_bytes() if get_gui_elf.returncode == 0 else b""
+    gui_elf.unlink(missing_ok=True)
     if (verification.returncode or tree.returncode or get_file.returncode
-            or get_guest_elf.returncode or "note" not in tree.stdout
-            or persisted != b"hello" or not guest_image.startswith(b"\x7fELF\x02\x01\x01")):
+            or get_guest_elf.returncode or get_gui_elf.returncode
+            or "note" not in tree.stdout or persisted != b"hello"
+            or not guest_image.startswith(b"\x7fELF\x02\x01\x01")
+            or not gui_image.startswith(b"\x7fELF\x02\x01\x01")):
         print(verification.stdout + verification.stderr + tree.stdout + tree.stderr, end="")
         print(get_file.stdout + get_file.stderr, end="")
         print(get_guest_elf.stdout + get_guest_elf.stderr, end="")
+        print(get_gui_elf.stdout + get_gui_elf.stderr, end="")
         print("ОШИБКА: COW/FASM-результаты не пережили остановку VM", file=sys.stderr)
         raise SystemExit(1)
 
     print(bytes(captured).decode("utf-8", errors="replace"), end="")
-    print("Shell-тест пройден: PS/2 → shell → VaraniaFS/NVMe, remount fsck и VGA работают end-to-end.")
+    print("Shell-тест пройден: PS/2 → shell → VaraniaFS/NVMe, remount fsck и VBE работают end-to-end.")
 
 
 if __name__ == "__main__":

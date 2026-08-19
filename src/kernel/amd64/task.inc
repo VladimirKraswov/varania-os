@@ -23,13 +23,13 @@ Task.waiter       = 104
 Task.wait_target  = 112
 Task.wait_cap     = 120
 Task.cap_target   = 128             ;// CAP_SLOTS qword
-Task.cap_rights   = 256
-Task.cap_type     = 384
-Task.cap_node     = 512             ;// lineage node для revoke descendants
-Task.space         = 640            ;// AddressSpace object для low-level create
-Task.wait_endpoint = 648            ;// Endpoint object при блокировке IPC
-Task.wait_buffer   = 656            ;// user IpcMessage*
-Task.size          = 664
+Task.cap_rights   = Task.cap_target+CAP_SLOTS*8
+Task.cap_type     = Task.cap_rights+CAP_SLOTS*8
+Task.cap_node     = Task.cap_type+CAP_SLOTS*8 ;// lineage node для revoke descendants
+Task.space         = Task.cap_node+CAP_SLOTS*8 ;// AddressSpace object low-level create
+Task.wait_endpoint = Task.space+8              ;// Endpoint object при блокировке IPC
+Task.wait_buffer   = Task.wait_endpoint+8      ;// user IpcMessage*
+Task.size          = Task.wait_buffer+8
 
 Context.r15      = 0
 Context.r14      = 8
@@ -53,7 +53,7 @@ Context.rsp      = 144
 Context.ss       = 152
 Context.size     = 160
 
-TASK_MAX          = 16
+TASK_MAX          = 24              ;// GUI-сервисы + приложения без искусственного потолка 16
 TASK_EMPTY        = 0
 TASK_RUNNABLE     = 1
 TASK_BLOCKED_IPC  = 2
@@ -64,7 +64,10 @@ TASK_REAPABLE     = 6               ;// ресурсы освобождены, �
 TASK_ZOMBIE_REAP  = 7               ;// waiter получил статус, удалить TCB
 TASK_SUSPENDED    = 8
 
-CAP_SLOTS    = 16
+;// Bootstrap device manager держит framebuffer/IRQ/I/O capabilities и во
+;// время ELF load временные frame/space handles. 32 — небольшой современный
+;// лимит, а вычисляемые offsets выше не дают структуре незаметно разойтись.
+CAP_SLOTS    = 32
 
 ;// Узел происхождения capability. Дерево хранится отдельно от object refcount:
 ;// close освобождает право текущего holder, revoke обходит только потомков.
@@ -1504,6 +1507,47 @@ function task_create_init
   mov ecx, CAP_CREATE
   call capability_insert_task
   cmp eax, 8
+  jne .failed
+  ;// VBE framebuffer: точный диапазон сообщил BIOS, произвольный MMIO init
+  ;// по-прежнему создавать не может. Handle отсутствует при text-only boot.
+  cmp dword [HHDM.base+VBE.bootInfo+VBE.Boot.magic], VBE.magic
+  jne .failed
+  mov rdx, [HHDM.base+VBE.bootInfo+VBE.Boot.pages]
+  shl rdx, 48
+  mov eax, [HHDM.base+VBE.bootInfo+VBE.Boot.physical]
+  or rdx, rax
+  mov rdi, r15
+  mov esi, CAP_MMIO
+  mov ecx, CAP_MAP+CAP_READ+CAP_WRITE
+  call capability_insert_task
+  cmp eax, 9
+  jne .failed
+  mov edi, r12d
+  mov esi, 12
+  call capability_grant_irq
+  cmp eax, 10
+  jne .failed
+  mov edi, r12d
+  mov esi, 0x60
+  mov edx, 5
+  mov ecx, CAP_READ+CAP_WRITE
+  call capability_grant_io
+  cmp eax, 11
+  jne .failed
+  ;// platformd получает два предельно узких диапазона: CMOS RTC и ACPI PM.
+  mov edi, r12d
+  mov esi, 0x70
+  mov edx, 2
+  mov ecx, CAP_READ+CAP_WRITE
+  call capability_grant_io
+  cmp eax, 12
+  jne .failed
+  mov edi, r12d
+  mov esi, 0x604
+  mov edx, 4
+  mov ecx, CAP_WRITE
+  call capability_grant_io
+  cmp eax, 13
   jne .failed
   mov eax, 1
   jmp .done

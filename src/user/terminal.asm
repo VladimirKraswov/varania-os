@@ -28,6 +28,12 @@ start:
   test rax, rax
   js .failed
   mov [session_endpoint], rax
+  ;// VGA остаётся best-effort compatibility mirror для text firmware. В VBE
+  ;// authoritative cells идут тому же terminal model через GUI ABI.
+  call lookup_gui
+  test rax, rax
+  js .failed
+  mov [gui_endpoint], rax
   call console_clear
   lea rdi, [welcome_text]
   mov esi, welcome_text.size
@@ -148,6 +154,8 @@ start:
   lea rsi, [message+IpcMessage.words+16]
   mov ecx, edx
   rep movsw
+  mov qword [message+IpcMessage.words], GUI_TERM_DRAW
+  call gui_send_message
   jmp .serve
 
 .failed:
@@ -344,6 +352,40 @@ lookup_session:
 .done:
   ret
 
+;// GUI стартует раньше terminal, поэтому lookup обычно завершается сразу;
+;// retry сохраняет корректность при другом порядке запуска system session.
+lookup_gui:
+.retry:
+  lea rdi, [gui_message]
+  mov ecx, IpcMessage.bytes*2
+  xor eax, eax
+  rep stosb
+  mov qword [gui_message+IpcMessage.words], NAMESERVER_LOOKUP
+  mov qword [gui_message+IpcMessage.words+8], SERVICE_GUI
+  mov qword [gui_message+IpcMessage.words+16], 1
+  mov qword [gui_message+IpcMessage.cap_count], 1
+  mov qword [gui_message+IpcMessage.caps+IpcCap.handle], SELF_EP
+  mov qword [gui_message+IpcMessage.caps+IpcCap.rights], CAP_SEND
+  ipc_send NAMESERVER_EP, gui_message
+  test rax, rax
+  jnz .done
+  ipc_receive SELF_EP, gui_reply
+  test rax, rax
+  jnz .done
+  cmp qword [gui_reply+IpcMessage.words], 0
+  je .found
+  system_call SYS_YIELD
+  jmp .retry
+.found:
+  cmp qword [gui_reply+IpcMessage.cap_count], 1
+  jne .invalid
+  mov rax, qword [gui_reply+IpcMessage.caps+IpcCap.handle]
+  ret
+.invalid:
+  mov rax, -22
+.done:
+  ret
+
 ;// RDI=key event. При переполнении отбрасывается самое старое событие:
 ;// свежий Ctrl+Q/F10 важнее давно накопленного autorepeat.
 key_queue_push:
@@ -421,6 +463,13 @@ console_put:
   add rax, VGA_BASE
   mov [rax], bl
   mov byte [rax+1], VGA_ATTRIBUTE
+  ;// В VBE graphics mode legacy aperture 0xB8000 у некоторых firmware
+  ;// backends читается как 0xFFFF даже сразу после записи. VGA здесь только
+  ;// best-effort mirror: authoritative cell строим из известных byte-ов и
+  ;// передаём GUI, не перечитывая device memory.
+  movzx edx, bl
+  or edx, VGA_ATTRIBUTE shl 8
+  call gui_notify_current_cell
   inc qword [cursor_x]
   cmp qword [cursor_x], VGA_WIDTH
   jb .done
@@ -442,6 +491,8 @@ console_put:
   shl rax, 1
   add rax, VGA_BASE
   mov word [rax], (VGA_ATTRIBUTE shl 8)+' '
+  mov edx, (VGA_ATTRIBUTE shl 8)+' '
+  call gui_notify_current_cell
 .done:
   pop rbx
   ret
@@ -454,6 +505,12 @@ console_clear:
   rep stosw
   mov qword [cursor_x], 0
   mov qword [cursor_y], 0
+  lea rdi, [gui_message]
+  mov ecx, IpcMessage.bytes
+  xor eax, eax
+  rep stosb
+  mov qword [gui_message+IpcMessage.words], GUI_TERM_CLEAR
+  call gui_send_message
   ret
 
 console_scroll:
@@ -465,6 +522,51 @@ console_scroll:
   mov ax, (VGA_ATTRIBUTE shl 8)+' '
   mov ecx, VGA_WIDTH
   rep stosw
+  lea rdi, [gui_message]
+  mov ecx, IpcMessage.bytes
+  xor eax, eax
+  rep stosb
+  mov qword [gui_message+IpcMessage.words], GUI_TERM_SCROLL
+  call gui_send_message
+  ret
+
+;// EDX=VGA cell, cursor_x/cursor_y указывают ещё на изменённую позицию.
+gui_notify_current_cell:
+  push rbx
+  mov ebx, edx
+  lea rdi, [gui_message]
+  mov ecx, IpcMessage.bytes
+  xor eax, eax
+  rep stosb
+  mov qword [gui_message+IpcMessage.words], GUI_TERM_PUT
+  mov rax, [cursor_x]
+  mov qword [gui_message+IpcMessage.words+8], rax
+  mov rax, [cursor_y]
+  mov qword [gui_message+IpcMessage.words+16], rax
+  mov qword [gui_message+IpcMessage.words+24], rbx
+  call gui_send_message
+  pop rbx
+  ret
+
+;// Отправить gui_message или, для TERM_DRAW, исходный message. В обоих случаях
+;// backpressure означает лишь занятый compositor, поэтому уступаем CPU.
+gui_send_message:
+  push r12
+  lea r12, [gui_message]
+  cmp qword [message+IpcMessage.words], GUI_TERM_DRAW
+  jne .retry
+  lea r12, [message]
+.retry:
+  mov eax, SYS_IPC_SEND
+  mov rdi, [gui_endpoint]
+  mov rsi, r12
+  syscall
+  cmp rax, -11
+  jne .done
+  system_call SYS_YIELD
+  jmp .retry
+.done:
+  pop r12
   ret
 
 close_received_caps:
@@ -507,6 +609,7 @@ align 8
 cursor_x dq 0
 cursor_y dq 0
 session_endpoint dq 0
+gui_endpoint dq 0
 pending_reply dq 0
 pending_mode dq 0               ;// 1=READLINE, 2=READKEY
 line_length dq 0
@@ -520,3 +623,5 @@ message rb IpcMessage.bytes
 reply rb IpcMessage.bytes
 control_message rb IpcMessage.bytes
 control_reply rb IpcMessage.bytes
+gui_message rb IpcMessage.bytes
+gui_reply rb IpcMessage.bytes

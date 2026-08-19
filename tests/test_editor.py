@@ -11,7 +11,10 @@ import sys
 import tempfile
 import time
 
-from test_shell import QmpClient, connect_qmp, read_vga, type_command, wait_debug
+from test_shell import (
+    QmpClient, changed_pixels, connect_qmp, read_framebuffer, type_command,
+    wait_debug,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,13 +50,49 @@ def press_burst(qmp: QmpClient, key: str, count: int) -> None:
         time.sleep(0.012)
 
 
-def read_vga_attributes(qmp: QmpClient, directory: Path) -> set[int]:
-    dump = directory / "vga-attributes.bin"
-    qmp.hmp(f'pmemsave 0xb8000 4000 "{dump}"')
-    raw = dump.read_bytes()
-    if len(raw) != 4000:
-        raise RuntimeError("не удалось прочитать VGA text buffer")
-    return set(raw[1::2])
+def framebuffer_colours(pixels: bytes) -> set[bytes]:
+    return {pixels[index:index + 3] for index in range(0, len(pixels), 3)}
+
+
+def has_repeated_terminal_cells(
+    pixels: bytes, width: int, height: int, expected_run: int,
+) -> bool:
+    """Найти строку одинаковых непустых glyph cells в VBE terminal view."""
+    # Эти размеры являются частью текущего GUI ABI 1 layout и совпадают с
+    # TERM_COLS/ROWS/CELL_W/CELL_H в gui.asm.
+    cell_width, cell_height = 12, 18
+    columns, rows = 80, 25
+    origin_x = (width - columns * cell_width) // 2
+    origin_y = (height - rows * cell_height) // 2
+    if origin_x < 0 or origin_y < 0:
+        return False
+
+    for row in range(rows):
+        previous: bytes | None = None
+        run = 0
+        for column in range(columns):
+            chunks = []
+            x = origin_x + column * cell_width
+            y = origin_y + row * cell_height
+            for pixel_y in range(y, y + cell_height):
+                begin = (pixel_y * width + x) * 3
+                chunks.append(pixels[begin:begin + cell_width * 3])
+            pattern = b"".join(chunks)
+            colours = {
+                pattern[index:index + 3]
+                for index in range(0, len(pattern), 3)
+            }
+            visible = len(colours) > 1
+            if visible and pattern == previous:
+                run += 1
+            elif visible:
+                run = 1
+            else:
+                run = 0
+            previous = pattern if visible else None
+            if run >= expected_run:
+                return True
+    return False
 
 
 def remove_guest_file(path: str) -> None:
@@ -112,12 +151,16 @@ def main() -> None:
         press(client, "f7")
         wait_debug(process, captured, EDITOR_TEMPLATE, 1)
         time.sleep(0.1)
-        editor_screen = read_vga(client, temporary)
-        attributes = read_vga_attributes(client, temporary)
-        if "VEdit ABI 1" not in editor_screen:
-            raise AssertionError(f"нет полноэкранного интерфейса VEdit\n{editor_screen}")
-        if not ({0x09, 0x0A, 0x0E} & attributes):
-            raise AssertionError(f"нет цветной syntax highlighting: {sorted(attributes)}")
+        width, height, editor_pixels = read_framebuffer(
+            client, temporary, "editor-template"
+        )
+        if (width, height) != (1280, 800):
+            raise AssertionError(f"ожидался VBE 1280x800, получен {width}x{height}")
+        # Точные RGB берутся из VGA-compatible palette GUI: blue/green/yellow.
+        syntax_colours = {b"\x58\xA6\xFF", b"\x75\xD6\x9C", b"\xFF\xC8\x57"}
+        visible_colours = framebuffer_colours(editor_pixels)
+        if len(syntax_colours & visible_colours) < 2:
+            raise AssertionError("на VBE framebuffer нет цветной syntax highlighting")
 
         # Регрессия: editor_insert_byte получает символ в DIL, а для сдвига
         # хвоста использует RDI. Раньше адрес затирал DIL, и одна клавиша
@@ -126,27 +169,23 @@ def main() -> None:
         press(client, "home")
         repeat_count = 12
         press_burst(client, "a", repeat_count)
-        repeated_key_screen = ""
-        repeat_deadline = time.monotonic() + 3
-        expected_repeat = "a" * repeat_count + ".size"
-        while time.monotonic() < repeat_deadline:
-            repeated_key_screen = read_vga(client, temporary)
-            if expected_repeat in repeated_key_screen:
-                break
-            time.sleep(0.05)
-        if expected_repeat not in repeated_key_screen:
+        time.sleep(0.15)
+        _, _, repeated_pixels = read_framebuffer(client, temporary, "repeated-key")
+        if not has_repeated_terminal_cells(
+            repeated_pixels, width, height, repeat_count
+        ):
             raise AssertionError(
-                "быстрый повтор клавиши потерян или keyboard driver остановился\n"
-                + repeated_key_screen
+                "быстрый повтор клавиши потерян или дал разные glyph cells"
             )
         for _ in range(repeat_count):
             press(client, "backspace")
 
+        _, _, before_debug = read_framebuffer(client, temporary, "before-debug")
         press(client, "f2")
         time.sleep(0.1)
-        debug_screen = read_vga(client, temporary)
-        if "DEBUG off=" not in debug_screen:
-            raise AssertionError(f"F2 не включил debug mode\n{debug_screen}")
+        _, _, debug_pixels = read_framebuffer(client, temporary, "debug-mode")
+        if changed_pixels(before_debug, debug_pixels) < 100:
+            raise AssertionError("F2 не изменил видимый debug panel")
 
         press(client, "ctrl-s")
         wait_debug(process, captured, EDITOR_SAVED, 1)
@@ -190,8 +229,8 @@ def main() -> None:
     except (AssertionError, OSError, RuntimeError, TimeoutError) as error:
         if client is not None:
             try:
-                print("\n--- VGA snapshot ---")
-                print(read_vga(client, temporary))
+                read_framebuffer(client, temporary, "failure")
+                print(f"\nFramebuffer snapshot: {temporary / 'failure.ppm'}")
             except (OSError, RuntimeError):
                 pass
         print(bytes(captured).decode("utf-8", errors="replace"), end="")

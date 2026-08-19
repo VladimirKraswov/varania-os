@@ -48,9 +48,11 @@ Output path получается заменой `.asm` на `.elf`, иначе �
 - текущая cell курсора инвертируется.
 
 VEdit формирует пары `character/attribute` в собственной памяти и отправляет
-terminal до 24 cells за IPC. Terminal проверяет координаты и остаётся
-единственным владельцем VGA MMIO. При переходе к GOP этот API будет заменён
-surface/font service без выдачи framebuffer capability приложению.
+terminal до 24 cells за IPC. Terminal проверяет координаты, сохраняет
+compatibility VGA mirror и пересылает cells в GUI. Только `gui.elf` владеет VBE
+framebuffer и rasterizer; VEdit framebuffer capability не получает. При
+переходе к GOP изменится video backend GUI, а terminal/editor ABI останется тем
+же.
 
 При обычном наборе VEdit перерисовывает только текущую строку, title, status и
 cursor — 12 коротких сообщений вместо примерно 100 для полного экрана.
@@ -73,7 +75,7 @@ debug capability, register snapshot и stop/resume protocol; давать ред
 `make test-editor` настоящими PS/2/QMP events выполняет:
 
 1. `edit /system/build/editortest.asm`;
-2. F7 и проверку цветных VGA attributes;
+2. F7 и проверку точных цветов syntax highlighting на VBE framebuffer;
 3. burst из 12 одинаковых клавиш внутри строки без потерь/искажения;
 4. F2, Ctrl+S, F5, F6 и выполнение нового ELF;
 5. запуск бесконечного `/bin/hang.elf`, Ctrl+C и возврат к рабочему `ls`;

@@ -93,6 +93,12 @@ BOOT2.start:
   include "../kernel/memory/meminfo.inc"
   meminfo.get_smap SMAP.segment, SMAP.offset
 
+  ;// Последний BIOS-вызов перед protected mode выбирает линейный 32-битный
+  ;// framebuffer. Ищем лучший режим до 1280x800: это практический максимум
+  ;// для программного композитора при минимальных 128 MiB RAM. Если VBE нет,
+  ;// загрузка продолжится в text mode, а GUI-сервис честно сообщит ошибку.
+  call vbe_initialize
+
   ;// Загружаем GDTR таблицей 32-битных дескрипторов
   lgdt [GDTR32]
 
@@ -110,6 +116,120 @@ BOOT2.start:
 
   ;// Переходим на 32-битный код
   jmp fword SEL.code32:stage32
+
+;// Выбрать лучший VBE 2.0 direct-color LFB не больше 1280x800.
+;// Буферы расположены в зарезервированной низкой памяти и затем читаются
+;// микроядром только как platform boot information.
+vbe_initialize:
+  push ax
+  push bx
+  push cx
+  push dx
+  push si
+  push di
+  push es
+  push fs
+  xor ax, ax
+  mov es, ax
+  mov di, VBE.controllerInfo
+  mov dword [es:di], VBE.magic
+  mov ax, 0x4F00
+  int 0x10
+  cmp ax, 0x004F
+  jne .done
+
+  mov si, [es:VBE.controllerInfo+14] ;// far pointer: offset
+  mov ax, [es:VBE.controllerInfo+16] ;// far pointer: segment
+  mov fs, ax
+  mov dword [es:VBE.bootInfo+VBE.Boot.magic], 0
+  mov word [es:VBE.bootInfo+VBE.Boot.mode], 0xFFFF
+  mov dword [es:VBE.bootInfo+VBE.Boot.pages], 0 ;// временно best area
+.mode:
+  mov cx, [fs:si]
+  add si, 2
+  cmp cx, 0xFFFF
+  je .select
+  push cx
+  push si
+  push fs
+  xor ax, ax
+  mov es, ax
+  mov di, VBE.modeInfo
+  mov ax, 0x4F01
+  int 0x10
+  pop fs
+  pop si
+  pop cx
+  cmp ax, 0x004F
+  jne .mode
+  mov ax, [es:VBE.modeInfo+0]     ;// supported + graphics + linear framebuffer
+  and ax, 0x0091
+  cmp ax, 0x0091
+  jne .mode
+  cmp byte [es:VBE.modeInfo+25], 32
+  jne .mode
+  cmp byte [es:VBE.modeInfo+27], 6 ;// direct color
+  jne .mode
+  movzx eax, word [es:VBE.modeInfo+18]
+  cmp eax, 800
+  jb .mode
+  cmp eax, 1280
+  ja .mode
+  movzx edx, word [es:VBE.modeInfo+20]
+  cmp edx, 600
+  jb .mode
+  cmp edx, 800
+  ja .mode
+  imul eax, edx
+  cmp eax, [es:VBE.bootInfo+VBE.Boot.pages]
+  jbe .mode
+  mov [es:VBE.bootInfo+VBE.Boot.pages], eax
+  mov [es:VBE.bootInfo+VBE.Boot.mode], cx
+  jmp .mode
+
+.select:
+  mov bx, [es:VBE.bootInfo+VBE.Boot.mode]
+  cmp bx, 0xFFFF
+  je .done
+  ;// Повторно получаем информацию именно выбранного режима: modeInfo в цикле
+  ;// сейчас описывает последний проверенный режим, а не обязательно лучший.
+  mov cx, bx
+  mov di, VBE.modeInfo
+  mov ax, 0x4F01
+  int 0x10
+  cmp ax, 0x004F
+  jne .done
+  or bx, 0x4000                  ;// linear framebuffer
+  mov ax, 0x4F02
+  int 0x10
+  cmp ax, 0x004F
+  jne .done
+  mov dword [es:VBE.bootInfo+VBE.Boot.magic], VBE.magic
+  movzx eax, word [es:VBE.modeInfo+18]
+  mov [es:VBE.bootInfo+VBE.Boot.width], eax
+  movzx eax, word [es:VBE.modeInfo+20]
+  mov [es:VBE.bootInfo+VBE.Boot.height], eax
+  movzx eax, word [es:VBE.modeInfo+16]
+  mov [es:VBE.bootInfo+VBE.Boot.pitch], eax
+  movzx eax, byte [es:VBE.modeInfo+25]
+  mov [es:VBE.bootInfo+VBE.Boot.bpp], eax
+  mov eax, [es:VBE.modeInfo+40]
+  mov [es:VBE.bootInfo+VBE.Boot.physical], eax
+  mov eax, [es:VBE.bootInfo+VBE.Boot.pitch]
+  mul dword [es:VBE.bootInfo+VBE.Boot.height]
+  add eax, PAGE_SIZE-1
+  shr eax, 12
+  mov [es:VBE.bootInfo+VBE.Boot.pages], eax
+.done:
+  pop fs
+  pop es
+  pop di
+  pop si
+  pop dx
+  pop cx
+  pop bx
+  pop ax
+  ret
 
 ;// Таблица дескрипторов сегментов для 32-битного кода
 align 16
