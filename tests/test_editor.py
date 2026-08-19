@@ -108,6 +108,24 @@ def main() -> None:
         if not ({0x09, 0x0A, 0x0E} & attributes):
             raise AssertionError(f"нет цветной syntax highlighting: {sorted(attributes)}")
 
+        # Регрессия: editor_insert_byte получает символ в DIL, а для сдвига
+        # хвоста использует RDI. Раньше адрес затирал DIL, и одна клавиша
+        # вставляла разные байты при вводе внутри (не в конце) документа.
+        press(client, "up")       # последняя строка шаблона: .size = ...
+        press(client, "home")
+        press(client, "a")
+        press(client, "a")
+        press(client, "a")
+        repeated_key_screen = read_vga(client, temporary)
+        if "aaa.size" not in repeated_key_screen:
+            raise AssertionError(
+                "повтор одной клавиши внутри строки искажает символы\n"
+                + repeated_key_screen
+            )
+        press(client, "backspace")
+        press(client, "backspace")
+        press(client, "backspace")
+
         press(client, "f2")
         time.sleep(0.1)
         debug_screen = read_vga(client, temporary)
@@ -116,6 +134,9 @@ def main() -> None:
 
         press(client, "ctrl-s")
         wait_debug(process, captured, EDITOR_SAVED, 1)
+        # Маркер сохранения появляется до возврата VEdit в TERM_READKEY.
+        # Не посылаем F5 в короткое окно, где terminal ещё не принял waiter.
+        time.sleep(0.25)
         press(client, "f5")
         wait_debug(process, captured, EDITOR_BUILD, 1, timeout=20)
         # Marker печатается перед следующим полным render/read-key cycle.

@@ -457,7 +457,11 @@ editor_insert_template:
 ;//////////////////////////////////////////////////////////////////////////////
 
 ;// DIL=byte. Вставка сдвигает хвост назад; document остаётся плотным массивом.
+;// Сохраняем символ до загрузки адреса назначения в RDI: DIL является младшей
+;// частью RDI, поэтому без этого вставка внутри строки зависела бы от младшего
+;// байта адреса document+length, а не от нажатой клавиши.
 editor_insert_byte:
+  mov r8b, dil
   mov rax, [document_length]
   cmp rax, DOCUMENT_MAX
   jae .full
@@ -471,7 +475,7 @@ editor_insert_byte:
   rep movsb
   cld
 .store:
-  mov [document+rdx], dil
+  mov [document+rdx], r8b
   inc qword [document_length]
   inc qword [cursor_offset]
   mov byte [document_dirty], 1
