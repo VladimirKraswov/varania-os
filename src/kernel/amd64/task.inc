@@ -25,12 +25,10 @@ Task.wait_cap     = 120
 Task.cap_target   = 128             ;// CAP_SLOTS qword
 Task.cap_rights   = 256
 Task.cap_type     = 384
-Task.queue_head   = 512
-Task.queue_tail   = 520
-Task.queue_count  = 528
-Task.queue_sender = 536             ;// IPC_QUEUE_SIZE qword
-Task.queue_value  = 600
-Task.size         = 672
+Task.space         = 512             ;// AddressSpace object для low-level create
+Task.wait_endpoint = 520             ;// Endpoint object при блокировке IPC
+Task.wait_buffer   = 528             ;// user IpcMessage*
+Task.size          = 536
 
 Context.r15      = 0
 Context.r14      = 8
@@ -63,22 +61,13 @@ TASK_BLOCKED_WAIT = 4
 TASK_ZOMBIE       = 5               ;// ресурсы ещё принадлежат задаче
 TASK_REAPABLE     = 6               ;// ресурсы освобождены, статус ждёт parent
 TASK_ZOMBIE_REAP  = 7               ;// waiter получил статус, удалить TCB
+TASK_SUSPENDED    = 8
 
 CAP_SLOTS    = 16
-CAP_SEND     = 1
-CAP_READ     = 2
-CAP_WRITE    = 4
-CAP_WAIT     = 8
-CAP_SPAWN    = 16
-CAP_PROCESS  = 1
-CAP_IO_PORT  = 2
-CAP_IRQ      = 3
-CAP_SYSTEM   = 4
-
-IPC_QUEUE_SIZE = 8
 
 USER.imageMin       = 0x0000000000010000
 USER.imageMax       = 0x0000000040000000
+USER.bootfsBase     = 0x0000000080000000
 USER.stackTop       = 0x00007FFFFFF00000
 USER.stackMaxPages  = 16
 USER.stackLimit     = USER.stackTop-USER.stackMaxPages*PAGE_SIZE
@@ -97,7 +86,7 @@ gdt64_descriptor_high:
   dw GDT64.size-1
   dq HHDM.base+GDT64.base
 
-init_program_name db "init.elf"
+init_program_name db "procd.elf"
 init_program_name.size = $-init_program_name
 
 ;// RDI=slot. RAX=TCB или 0.
@@ -189,6 +178,17 @@ function task_discard_new
   push r12
   mov rbx, rdi
   mov r12, rsi
+  mov rdi, rbx
+  call capability_clear_all
+  mov rsi, [rbx+Task.space]
+  test rsi, rsi
+  jz .legacy_space
+  mov edi, CAP_SPACE
+  call object_release
+  mov qword [rbx+Task.space], 0
+  mov qword [rbx+Task.cr3], 0
+  jmp .kernel_stack
+  .legacy_space:
   mov rdi, [rbx+Task.cr3]
   test rdi, rdi
   jz .kernel_stack
@@ -293,23 +293,87 @@ function task_spawn_image
   pop rbx
 endf
 
+;// Освободить объект, на который ссылалась capability.
+;// Для специальных kernel token (process/IRQ/I/O/system/bootfs) это no-op.
+;// RDI=type, RSI=target.
+function capability_release
+  call object_release
+endf
+
+;// RDI=TCB, RSI=zero-based slot. Закрывает handle и освобождает его ссылку.
+function capability_clear_slot
+  push rbx
+  push r12
+  mov rbx, rdi
+  mov r12, rsi
+  cmp r12, CAP_SLOTS
+  jae .done
+  mov rsi, [rbx+Task.cap_target+r12*8]
+  test rsi, rsi
+  jz .done
+  mov rdi, [rbx+Task.cap_type+r12*8]
+  mov qword [rbx+Task.cap_target+r12*8], 0
+  mov qword [rbx+Task.cap_rights+r12*8], 0
+  mov qword [rbx+Task.cap_type+r12*8], 0
+  call capability_release
+  .done:
+  pop r12
+  pop rbx
+endf
+
+;// RDI=TCB. Закрыть все capabilities при завершении процесса.
+function capability_clear_all
+  push rbx
+  push r12
+  mov rbx, rdi
+  xor r12d, r12d
+  .next:
+    mov rdi, rbx
+    mov rsi, r12
+    call capability_clear_slot
+    inc r12
+    cmp r12, CAP_SLOTS
+    jb .next
+  pop r12
+  pop rbx
+endf
+
 ;// RDI=TCB, RSI=type, RDX=object, RCX=rights. RAX=handle или 0.
-leaf_function capability_insert_task
+;// Успешная вставка создаёт сильную ссылку на heap-object.
+function capability_insert_task
+  push rbx
+  push r12
+  push r13
+  push r14
+  mov rbx, rdi
+  mov r12, rsi
+  mov r13, rdx
+  mov r14, rcx
   xor eax, eax
   .find:
-    cmp qword [rdi+Task.cap_target+rax*8], 0
+    cmp qword [rbx+Task.cap_target+rax*8], 0
     je .found
     inc eax
     cmp eax, CAP_SLOTS
     jb .find
   xor eax, eax
-  ret
+  jmp .done
   .found:
-  mov [rdi+Task.cap_target+rax*8], rdx
-  mov [rdi+Task.cap_rights+rax*8], rcx
-  mov [rdi+Task.cap_type+rax*8], rsi
+  push rax
+  mov rdi, r12
+  mov rsi, r13
+  call object_retain
+  pop rax
+  mov [rbx+Task.cap_target+rax*8], r13
+  mov [rbx+Task.cap_rights+rax*8], r14
+  mov [rbx+Task.cap_type+rax*8], r12
   inc eax
-end_leaf
+  .done:
+  pop r14
+  pop r13
+  pop r12
+  pop rbx
+endf
 
 ;// RDI=owner slot, остальные аргументы как capability_insert_task.
 function capability_insert
@@ -386,6 +450,106 @@ function capability_lookup
   pop rbx
 endf
 
+;// Найти capability любого типа у текущей задачи.
+;// RDI=handle. RAX=target, RDX=type, RCX=rights, R8=zero-based slot; RAX=0.
+function capability_lookup_any_current
+  push rbx
+  mov rbx, rdi
+  test rbx, rbx
+  jz .failed
+  cmp rbx, CAP_SLOTS
+  ja .failed
+  dec rbx
+  mov edi, [current_task]
+  call task_by_index
+  test rax, rax
+  jz .failed
+  mov rdx, [rax+Task.cap_type+rbx*8]
+  mov rcx, [rax+Task.cap_rights+rbx*8]
+  mov rax, [rax+Task.cap_target+rbx*8]
+  test rax, rax
+  jz .failed
+  mov r8, rbx
+  jmp .done
+  .failed:
+  xor eax, eax
+  .done:
+  pop rbx
+endf
+
+;// Закрыть capability текущего процесса. RDI=handle. RAX=0/-9.
+function capability_close_current
+  push rbx
+  mov rbx, rdi
+  test rbx, rbx
+  jz .bad
+  cmp rbx, CAP_SLOTS
+  ja .bad
+  dec rbx
+  mov edi, [current_task]
+  call task_by_index
+  test rax, rax
+  jz .bad
+  cmp qword [rax+Task.cap_target+rbx*8], 0
+  je .bad
+  mov rdi, rax
+  mov rsi, rbx
+  call capability_clear_slot
+  xor eax, eax
+  jmp .done
+  .bad:
+  mov rax, -9
+  .done:
+  pop rbx
+endf
+
+;// Отделить capability без уменьшения refs. Нужен, когда ownership frame или
+;// space переходит из handle в mapping/thread. RDI=handle, RSI=expected type.
+;// RAX=target или 0.
+function capability_take_current
+  push rbx
+  push r12
+  push r13
+  sub rsp, 8
+  mov rbx, rdi
+  mov r12, rsi
+  call capability_lookup_any_current
+  test rax, rax
+  jz .failed
+  cmp rdx, r12
+  jne .failed
+  mov rbx, rax
+  mov r13, r8
+  mov edi, [current_task]
+  call task_by_index
+  mov qword [rax+Task.cap_target+r13*8], 0
+  mov qword [rax+Task.cap_rights+r13*8], 0
+  mov qword [rax+Task.cap_type+r13*8], 0
+  mov rax, rbx
+  jmp .done
+  .failed:
+  xor eax, eax
+  .done:
+  add rsp, 8
+  pop r13
+  pop r12
+  pop rbx
+endf
+
+;// RDI=TCB. RAX=число свободных handle slots.
+leaf_function capability_free_count
+  xor eax, eax
+  xor ecx, ecx
+  .slot:
+    cmp qword [rdi+Task.cap_target+rcx*8], 0
+    jne .next
+    inc eax
+  .next:
+    inc ecx
+    cmp ecx, CAP_SLOTS
+    jb .slot
+end_leaf
+
 ;// Скопировать capability текущего процесса ребёнку с ослаблением прав.
 ;// RDI=child TCB, RSI=parent handle, RDX=requested rights. RAX=child handle/0.
 function capability_clone_current
@@ -437,6 +601,20 @@ function task_release_resources
   mov rbx, rdi
   mov rdi, [rbx+Task.token]
   call device_release_task
+  mov rdi, rbx
+  call capability_clear_all
+
+  ;// Low-level THREAD_CREATE передаёт объект пространства задаче. Старый
+  ;// bootstrap loader пока заполняет только Task.cr3.
+  mov rsi, [rbx+Task.space]
+  test rsi, rsi
+  jz .legacy_space
+  mov edi, CAP_SPACE
+  call object_release
+  mov qword [rbx+Task.space], 0
+  mov qword [rbx+Task.cr3], 0
+  jmp .stack
+  .legacy_space:
   mov rdi, [rbx+Task.cr3]
   test rdi, rdi
   jz .stack
@@ -840,10 +1018,16 @@ leaf_function scheduler_start
   iretq
 end_leaf
 
-;// Создать user/init и выдать bootstrap capabilities 1..3. RAX=1/0.
+;// Создать единственный процесс, ELF которого знает kernel: user/procd.
+;// Procd получает механизмы создания объектов и read-only mapping bootfs;
+;// загрузка всех остальных ELF уже является политикой user space.
 function task_create_init
   push rbx
   push r12
+  push r13
+  push r14
+  push r15
+  sub rsp, 8
   lea rdi, [init_program_name]
   mov esi, init_program_name.size
   call initramfs_find
@@ -858,29 +1042,81 @@ function task_create_init
   mov r12d, edx                    ;// init slot
   mov rbx, rax                     ;// init token
   mov edi, r12d
+  call task_by_index
+  mov r15, rax
+
+  ;// Архив загружен ниже PMM.memStart и поэтому остаётся immutable bootstrap
+  ;// storage. В user space он отображается read-only и NX.
+  xor r14d, r14d
+  .map_bootfs:
+    mov rdi, [r15+Task.cr3]
+    mov rsi, USER.bootfsBase
+    add rsi, r14
+    mov rdx, INITRAMFS.physBase
+    add rdx, r14
+    mov rcx, PAGE.US+PAGE.NX
+    call vmm_map_in_space
+    test rax, rax
+    jz .failed
+    add r14, PAGE_SIZE
+    cmp r14, INITRAMFS.size
+    jb .map_bootfs
+
+  mov edi, r12d
   mov esi, CAP_SYSTEM
   mov edx, 1
-  mov ecx, CAP_SPAWN
+  mov ecx, CAP_CREATE
   call capability_insert
   cmp eax, 1
+  jne .failed
+
+  call endpoint_create
+  test rax, rax
+  jz .failed
+  mov r13, rax
+  mov rdi, r15
+  mov esi, CAP_ENDPOINT
+  mov rdx, r13
+  mov ecx, CAP_SEND+CAP_RECV
+  call capability_insert_task
+  cmp eax, 2
+  jne .release_endpoint_failed
+  mov edi, CAP_ENDPOINT
+  mov rsi, r13
+  call object_release
+
+  mov rdi, r15
+  mov esi, CAP_BOOTFS
+  mov edx, 1
+  mov ecx, CAP_READ
+  call capability_insert_task
+  cmp eax, 3
   jne .failed
   mov edi, r12d
   mov esi, 1
   call capability_grant_irq
-  cmp eax, 2
+  cmp eax, 4
   jne .failed
   mov edi, r12d
   mov esi, 0x60
   mov edx, 5
   mov ecx, CAP_READ
   call capability_grant_io
-  cmp eax, 3
+  cmp eax, 5
   jne .failed
   mov eax, 1
   jmp .done
+  .release_endpoint_failed:
+  mov edi, CAP_ENDPOINT
+  mov rsi, r13
+  call object_release
   .failed:
   xor eax, eax
   .done:
+  add rsp, 8
+  pop r15
+  pop r14
+  pop r13
   pop r12
   pop rbx
 endf

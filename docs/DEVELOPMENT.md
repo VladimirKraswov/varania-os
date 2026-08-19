@@ -11,9 +11,12 @@ image. Приоритет `tools/fasm/run.sh`:
 3. архивный бинарник на Linux x86_64;
 4. контейнер на macOS Apple Silicon.
 
-FASM 1.73.35 оставлен намеренно: это текущая стабильная ветка с простым
-самодостаточным бинарником. fasmg/fasm2 интересны как более мощные macro engines,
-но их обязательное введение ухудшило бы воспроизводимость учебного проекта.
+FASM 1.73.35 выпущен 24 февраля 2026 года. В нём добавлен 64-битный ELF
+executable самого assembler и актуальные исправления x86 parser. Версия
+зафиксирована намеренно: это современный самодостаточный FASM с воспроизводимым
+SHA-256. fasmg интересен как более общий macro engine, но его обязательное
+введение не даёт этому небольшому x86-64 ядру преимуществ, соразмерных новой
+bootstrap-зависимости.
 Использованные здесь `function`, `exception_stub`, `slab_class` и структурные
 смещения дают читаемый DSL, сохраняя обычный FASM build.
 
@@ -28,12 +31,12 @@ make clean && make test
 
 Проверяются:
 
-1. сборка boot/kernel, семи user ELF, initramfs и raw image;
+1. сборка boot/kernel, девяти user ELF, initramfs и raw image;
 2. `55 AA`, размеры, точная конкатенация и SHA-256 FASM;
 3. каждый ELF header/program header, file bounds, W^X и page overlap;
 4. многостраничные RX/RW segments `memory_test.elf`;
 5. реальная загрузка `qemu-system-x86_64` в TCG;
-6. user/init, четыре сообщения IPC и ring-3 keyboard IRQ через QMP;
+6. user procd, nameserver, capability transfer и четыре endpoint-сообщения;
 7. BSS, heap shrink/regrow, demand-growth stack и HHDM isolation;
 8. create/exit/wait, deferred teardown, возврат frames и slot reuse.
 
@@ -41,6 +44,7 @@ make clean && make test
 
 ```bash
 make smoke
+make test-capabilities
 make test-isolation
 make test-lifecycle
 ```
@@ -87,6 +91,8 @@ make debug
 - user pointer нельзя читать до `vmm_translate_user`;
 - новый user frame должен быть обнулён до установки mapping;
 - capability всегда проверяется по handle, type и rights;
+- heap capability создаёт сильную ссылку, queue transfer — отдельную ссылку;
+- успешный `SPACE_MAP` потребляет frame и передаёт ownership leaf mapping;
 - process object хранит token с generation, не голый slot;
 - у IRQ и SYSCALL должен оставаться единый `Context`;
 - текущий CR3/kernel stack нельзя освобождать на exit path;
@@ -109,7 +115,8 @@ make debug
 2. Считать аргументы только из сохранённого `Context`.
 3. Перевести каждый user pointer через `vmm_translate_user` или helper copy.
 4. Документировать blocking semantics, consumption capabilities и errno.
-5. Добавить user ELF, который проверяет normal и error path в QEMU.
+5. Явно записать, потребляет ли вызов capability/ownership.
+6. Добавить user ELF, который проверяет normal и error path в QEMU.
 
 ## CI
 

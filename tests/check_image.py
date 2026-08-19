@@ -20,7 +20,9 @@ IR_ENTRY = struct.Struct("<32sIIII")
 ELF_HEADER = struct.Struct("<16sHHIQQQIHHHHHH")
 ELF_PROGRAM = struct.Struct("<IIQQQQQQ")
 EXPECTED_PROGRAMS = {
+    "procd.elf",
     "init.elf",
+    "nameserver.elf",
     "service.elf",
     "client.elf",
     "keyboard.elf",

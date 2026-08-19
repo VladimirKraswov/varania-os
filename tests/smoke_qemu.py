@@ -21,6 +21,8 @@ IPC_QUEUE_MARKER = b"VARANIA:IPC_QUEUE_OK"
 MEMORY_MARKER = b"VARANIA:MEMORY_OK"
 DRIVER_MARKER = b"keyboard-driver: waiting for IRQ1"
 DRIVER_IRQ_MARKER = b"keyboard-driver: IRQ1 handled"
+PROCD_MARKER = b"procd: init started; process service ready"
+NAMESERVER_MARKER = b"nameserver: service endpoint registered"
 
 
 def main() -> None:
@@ -122,13 +124,16 @@ def main() -> None:
     if MEMORY_MARKER not in output:
         print("ОШИБКА: не пройден multi-page memory test", file=sys.stderr)
         raise SystemExit(1)
+    if PROCD_MARKER not in output or NAMESERVER_MARKER not in output:
+        print("ОШИБКА: не проверены user-space loader и capability discovery", file=sys.stderr)
+        raise SystemExit(1)
     if DRIVER_MARKER not in output:
         print("ОШИБКА: ring-3 драйвер не дошёл до ожидания IRQ", file=sys.stderr)
         raise SystemExit(1)
     if DRIVER_IRQ_MARKER not in output:
         print("ОШИБКА: IRQ1 не дошёл до ring-3 драйвера", file=sys.stderr)
         raise SystemExit(1)
-    print("Smoke-тест QEMU пройден: ELF init, queued IPC, memory и ring-3 IRQ работают.")
+    print("Smoke-тест QEMU пройден: user ELF loader, endpoint IPC, memory и ring-3 IRQ работают.")
 
 
 if __name__ == "__main__":

@@ -26,6 +26,7 @@ include "amd64/keyboard.inc"        ;// сохранён как bootstrap-дра
 include "amd64/pmm.inc"
 include "amd64/memory.inc"
 include "amd64/slab.inc"
+include "amd64/objects.inc"
 include "amd64/initramfs.inc"
 include "amd64/task.inc"
 include "amd64/elf.inc"
@@ -38,7 +39,7 @@ include "amd64/interrupts.inc"
 kernel_banner db "Varania microkernel amd64", 10
               db "ELF64, dynamic processes, capabilities, queued IPC", 10, 10, 0
 memory_text   db "Free physical frames: ", 0
-start_text    db "Starting user/init from initramfs...", 10, 0
+start_text    db "Starting user/procd with read-only bootfs...", 10, 0
 memory_error  db "ERROR: initramfs, allocation or init creation failed", 10, 0
 
 align 16

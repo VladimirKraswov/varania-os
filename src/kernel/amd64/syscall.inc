@@ -7,16 +7,24 @@
 
 SYS_LOG       = 1
 SYS_YIELD     = 2
-SYS_SEND      = 3
-SYS_RECV      = 4
 SYS_EXIT      = 5
 SYS_IO_READ8  = 6
 SYS_IO_WRITE8 = 7
 SYS_IRQ_WAIT  = 8
-SYS_SPAWN     = 9
 SYS_WAIT      = 10
 SYS_BRK       = 11
 SYS_MEM_INFO  = 12
+SYS_ENDPOINT_CREATE = 13
+SYS_IPC_SEND        = 14
+SYS_IPC_RECV        = 15
+SYS_SPACE_CREATE    = 16
+SYS_FRAME_ALLOC     = 17
+SYS_FRAME_WRITE     = 18
+SYS_SPACE_MAP       = 19
+SYS_THREAD_CREATE   = 20
+SYS_THREAD_START    = 21
+SYS_CAP_CLOSE       = 22
+SYS_BOOTFS_INFO     = 23
 
 ERR_NOENT = -2
 ERR_BAD_HANDLE = -9
@@ -26,60 +34,26 @@ ERR_BUSY = -16
 ERR_INVALID = -22
 ERR_NOSYS = -38
 
-SPAWN_MAX_NAME   = 31
 SPAWN_MAX_GRANTS = 4
 SpawnGrant.handle = 0
 SpawnGrant.rights = 8
 SpawnGrant.size   = 16
 
-syscall_user_rsp dq 0
+;// Конфигурация low-level thread. Ядро получает уже подготовленное address
+;// space и не знает, из какого формата executable появились эти значения.
+ThreadConfig.entry       = 0
+ThreadConfig.stack_top   = 8
+ThreadConfig.stack_low   = 16
+ThreadConfig.stack_limit = 24
+ThreadConfig.brk_base    = 32
+ThreadConfig.grant_count = 40
+ThreadConfig.grants      = 48
+ThreadConfig.bytes       = ThreadConfig.grants+SPAWN_MAX_GRANTS*SpawnGrant.size
 
-;// Копировать только после page-table validation.
-;// RDI=kernel destination, RSI=user source, RDX=size. RAX=1/0.
-function syscall_copy_from_user
-  push rbx
-  push r12
-  push r13
-  push r14
-  push r15
-  sub rsp, 8
-  mov r12, rdi
-  mov r13, rsi
-  mov r14, rdx
-  mov edi, [current_task]
-  call task_by_index
-  mov r15, [rax+Task.cr3]
-  .byte:
-    test r14, r14
-    jz .success
-    mov rax, USER.limit
-    cmp r13, rax
-    jae .failed
-    mov rdi, r15
-    mov rsi, r13
-    call vmm_translate_user
-    test rax, rax
-    jz .failed
-    hhdm_address rbx, rax
-    mov al, [rbx]
-    mov [r12], al
-    inc r12
-    inc r13
-    dec r14
-    jmp .byte
-  .success:
-  mov eax, 1
-  jmp .done
-  .failed:
-  xor eax, eax
-  .done:
-  add rsp, 8
-  pop r15
-  pop r14
-  pop r13
-  pop r12
-  pop rbx
-endf
+SPACE_MAP_WRITE = 1
+SPACE_MAP_EXEC  = 2
+
+syscall_user_rsp dq 0
 
 ;// Вывести не более 256 байт из user-памяти.
 function syscall_log
@@ -126,126 +100,428 @@ function syscall_log
   pop rbx
 endf
 
-;// Создать ELF-процесс и передать до четырёх ослабленных capabilities.
-;// RDI=system cap, RSI=name, RDX=name len, RCX=grants, R8=count.
-function syscall_spawn
+;// Проверить bootstrap system capability. RDI=handle, RAX=1/0.
+function syscall_require_create
+  mov esi, CAP_SYSTEM
+  mov edx, CAP_CREATE
+  call capability_lookup
+  test rax, rax
+  setnz al
+  movzx eax, al
+endf
+
+;// Создать endpoint и вернуть handle с правами SEND|RECV.
+;// RDI=system capability. RAX=handle/error.
+function syscall_endpoint_create
+  push rbx
+  sub rsp, 8
+  call syscall_require_create
+  test rax, rax
+  jz .bad
+  call endpoint_create
+  test rax, rax
+  jz .no_memory
+  mov rbx, rax
+  mov edi, [current_task]
+  call task_by_index
+  mov rdi, rax
+  mov esi, CAP_ENDPOINT
+  mov rdx, rbx
+  mov ecx, CAP_SEND+CAP_RECV
+  call capability_insert_task
+  test rax, rax
+  jz .release_failed
+  push rax
+  mov edi, CAP_ENDPOINT
+  mov rsi, rbx
+  call object_release             ;// убрать временную creator reference
+  pop rax
+  jmp .done
+  .release_failed:
+  mov edi, CAP_ENDPOINT
+  mov rsi, rbx
+  call object_release
+  .no_memory:
+  mov rax, ERR_NO_MEMORY
+  jmp .done
+  .bad:
+  mov rax, ERR_BAD_HANDLE
+  .done:
+  add rsp, 8
+  pop rbx
+endf
+
+;// Создать пустое address space. RDI=system capability.
+function syscall_space_create
+  push rbx
+  sub rsp, 8
+  call syscall_require_create
+  test rax, rax
+  jz .bad
+  call address_space_create
+  test rax, rax
+  jz .no_memory
+  mov rbx, rax
+  mov edi, [current_task]
+  call task_by_index
+  mov rdi, rax
+  mov esi, CAP_SPACE
+  mov rdx, rbx
+  mov ecx, CAP_MAP
+  call capability_insert_task
+  test rax, rax
+  jz .release_failed
+  push rax
+  mov edi, CAP_SPACE
+  mov rsi, rbx
+  call object_release
+  pop rax
+  jmp .done
+  .release_failed:
+  mov edi, CAP_SPACE
+  mov rsi, rbx
+  call object_release
+  .no_memory:
+  mov rax, ERR_NO_MEMORY
+  jmp .done
+  .bad:
+  mov rax, ERR_BAD_HANDLE
+  .done:
+  add rsp, 8
+  pop rbx
+endf
+
+;// Выделить один обнулённый frame. RDI=system capability.
+function syscall_frame_alloc
+  push rbx
+  sub rsp, 8
+  call syscall_require_create
+  test rax, rax
+  jz .bad
+  call frame_create
+  test rax, rax
+  jz .no_memory
+  mov rbx, rax
+  mov edi, [current_task]
+  call task_by_index
+  mov rdi, rax
+  mov esi, CAP_FRAME
+  mov rdx, rbx
+  mov ecx, CAP_MAP+CAP_WRITE
+  call capability_insert_task
+  test rax, rax
+  jz .release_failed
+  push rax
+  mov edi, CAP_FRAME
+  mov rsi, rbx
+  call object_release
+  pop rax
+  jmp .done
+  .release_failed:
+  mov edi, CAP_FRAME
+  mov rsi, rbx
+  call object_release
+  .no_memory:
+  mov rax, ERR_NO_MEMORY
+  jmp .done
+  .bad:
+  mov rax, ERR_BAD_HANDLE
+  .done:
+  add rsp, 8
+  pop rbx
+endf
+
+;// Записать байты в ещё не отображённый frame.
+;// RDI=frame cap, RSI=offset, RDX=user source, RCX=size.
+function syscall_frame_write
   push rbx
   push r12
   push r13
   push r14
   push r15
-  sub rsp, 104                    ;// name[32], grants[64], child token
+  sub rsp, 8
+  mov r12, rsi
+  mov r13, rdx
+  mov r14, rcx
+  mov esi, CAP_FRAME
+  mov edx, CAP_WRITE
+  call capability_lookup
+  test rax, rax
+  jz .bad
+  mov rbx, rax
+  mov rax, r12
+  add rax, r14
+  jc .invalid
+  cmp rax, PAGE_SIZE
+  ja .invalid
+  hhdm_address r15, [rbx+Frame.physical]
+  add r15, r12
+  mov edi, [current_task]
+  call task_by_index
+  mov rdi, r15
+  mov rsi, [rax+Task.cr3]
+  mov rdx, r13
+  mov rcx, r14
+  call vmm_copy_from_user_space
+  test rax, rax
+  jz .fault
+  xor eax, eax
+  jmp .done
+  .bad:
+  mov rax, ERR_BAD_HANDLE
+  jmp .done
+  .invalid:
+  mov rax, ERR_INVALID
+  jmp .done
+  .fault:
+  mov rax, ERR_FAULT
+  .done:
+  add rsp, 8
+  pop r15
+  pop r14
+  pop r13
+  pop r12
+  pop rbx
+endf
+
+;// Передать ownership физического frame отображению address space.
+;// RDI=space cap, RSI=frame cap, RDX=virtual, RCX=SPACE_MAP_*.
+function syscall_space_map
+  push rbx
+  push r12
+  push r13
+  push r14
+  push r15
+  sub rsp, 8
   mov r12, rdi
   mov r13, rsi
   mov r14, rdx
   mov r15, rcx
-  mov rbx, r8
-
+  test r14, PAGE_SIZE-1
+  jnz .invalid
+  cmp r14, USER.imageMin
+  jb .invalid
+  mov rax, USER.limit
+  cmp r14, rax
+  jae .invalid
+  cmp r15, SPACE_MAP_WRITE+SPACE_MAP_EXEC
+  ja .invalid
+  cmp r15, SPACE_MAP_WRITE+SPACE_MAP_EXEC
+  je .invalid                       ;// W^X
   mov rdi, r12
-  mov esi, CAP_SYSTEM
-  mov edx, CAP_SPAWN
+  mov esi, CAP_SPACE
+  mov edx, CAP_MAP
   call capability_lookup
   test rax, rax
-  jz .bad_handle
-  test r14, r14
-  jz .invalid
-  cmp r14, SPAWN_MAX_NAME
-  ja .invalid
-  cmp rbx, SPAWN_MAX_GRANTS
-  ja .invalid
-
-  mov rdi, rsp
-  mov rsi, r13
-  mov rdx, r14
-  call syscall_copy_from_user
+  jz .bad
+  mov rbx, rax                      ;// AddressSpace
+  mov rdi, r13
+  mov esi, CAP_FRAME
+  mov edx, CAP_MAP
+  call capability_lookup
   test rax, rax
-  jz .fault
-  test rbx, rbx
-  jz .find_image
-  lea rdi, [rsp+32]
-  mov rsi, r15
-  mov rdx, rbx
-  shl rdx, 4
-  call syscall_copy_from_user
-  test rax, rax
-  jz .fault
-
-  .find_image:
-  mov rdi, rsp
+  jz .bad
+  mov r12, rax                      ;// Frame
+  ;// Mapping забирает кадр безусловно: дублированный frame cap двусмысленен.
+  cmp qword [r12+Object.refs], 1
+  jne .busy
+  mov rdi, [rbx+AddressSpace.cr3]
   mov rsi, r14
-  call initramfs_find
+  call vmm_translate_user
   test rax, rax
-  jz .not_found
-  mov r12, rax                    ;// image
-  mov r13, rdx                    ;// image size
-  mov edi, [current_task]
-  call task_by_index
-  mov rdx, [rax+Task.token]
-  mov rdi, r12
-  mov rsi, r13
-  call task_spawn_image
+  jnz .busy
+  mov rcx, PAGE.US+PAGE.NX
+  test r15, SPACE_MAP_WRITE
+  jz .not_write
+  or rcx, PAGE.RW
+  .not_write:
+  test r15, SPACE_MAP_EXEC
+  jz .flags_ready
+  btr rcx, 63
+  .flags_ready:
+  mov rdi, [rbx+AddressSpace.cr3]
+  mov rsi, r14
+  mov rdx, [r12+Frame.physical]
+  call vmm_map_in_space
   test rax, rax
   jz .no_memory
-  mov [rsp+96], rax               ;// generation-safe child token
-  mov r14d, edx                   ;// child slot
-  mov edi, r14d
-  call task_by_index
-  mov r12, rax                    ;// child TCB
+  mov rdi, r13
+  mov esi, CAP_FRAME
+  call capability_take_current
+  cmp rax, r12
+  jne .invalid                       ;// invariant violation, mapping уже создано
+  mov qword [r12+Frame.physical], 0  ;// leaf PTE теперь владеет физ. кадром
+  mov edi, CAP_FRAME
+  mov rsi, r12
+  call object_release
+  xor eax, eax
+  jmp .done
+  .bad:
+  mov rax, ERR_BAD_HANDLE
+  jmp .done
+  .busy:
+  mov rax, ERR_BUSY
+  jmp .done
+  .no_memory:
+  mov rax, ERR_NO_MEMORY
+  jmp .done
+  .invalid:
+  mov rax, ERR_INVALID
+  .done:
+  add rsp, 8
+  pop r15
+  pop r14
+  pop r13
+  pop r12
+  pop rbx
+endf
 
-  xor r13d, r13d
+;// Создать suspended thread в уже подготовленном address space.
+;// RDI=system cap, RSI=space cap, RDX=user ThreadConfig*. RAX=process handle.
+function syscall_thread_create
+  push rbx
+  push r12
+  push r13
+  push r14
+  push r15
+  sub rsp, ThreadConfig.bytes+24
+  mov r12, rdi
+  mov r13, rsi
+  mov r14, rdx
+  call syscall_require_create
+  test rax, rax
+  jz .bad
+  mov rdi, r13
+  mov esi, CAP_SPACE
+  mov edx, CAP_MAP
+  call capability_lookup
+  test rax, rax
+  jz .bad
+  mov rbx, rax                    ;// AddressSpace
+  mov edi, [current_task]
+  call task_by_index
+  mov rdi, rsp
+  mov rsi, [rax+Task.cr3]
+  mov rdx, r14
+  mov ecx, ThreadConfig.bytes
+  call vmm_copy_from_user_space
+  test rax, rax
+  jz .fault
+  cmp qword [rsp+ThreadConfig.grant_count], SPAWN_MAX_GRANTS
+  ja .invalid
+  mov rax, USER.limit
+  cmp [rsp+ThreadConfig.entry], rax
+  jae .invalid
+  cmp [rsp+ThreadConfig.stack_top], rax
+  jae .invalid
+  mov rax, [rsp+ThreadConfig.stack_limit]
+  cmp rax, [rsp+ThreadConfig.stack_low]
+  ja .invalid
+  mov rax, [rsp+ThreadConfig.stack_low]
+  cmp rax, [rsp+ThreadConfig.stack_top]
+  jae .invalid
+
+  call task_allocate
+  test rax, rax
+  jz .no_memory
+  mov r15, rax                    ;// child TCB
+  mov [rsp+ThreadConfig.bytes], rdx ;// child token
+  mov [rsp+ThreadConfig.bytes+8], rcx ;// child slot
+  mov edi, [current_task]
+  call task_by_index
+  mov rax, [rax+Task.token]
+  mov [r15+Task.parent], rax
+  mov qword [r15+Task.wait_irq], -1
+  mov [r15+Task.space], rbx
+  mov rax, [rbx+AddressSpace.cr3]
+  mov [r15+Task.cr3], rax
+  mov edi, CAP_SPACE
+  mov rsi, rbx
+  call object_retain              ;// отдельная ownership-ссылка thread
+
+  call pmm_alloc_frame
+  test rax, rax
+  jz .discard
+  mov [r15+Task.kernel_frame], rax
+  hhdm_address rdi, rax
+  mov [r15+Task.kernel_top], rdi
+  add qword [r15+Task.kernel_top], PAGE_SIZE
+  xor esi, esi
+  mov edx, PAGE_SIZE
+  call memory_set
+
+  mov rdi, [r15+Task.kernel_top]
+  sub rdi, Context.size
+  mov [r15+Task.saved_rsp], rdi
+  mov rax, [rsp+ThreadConfig.entry]
+  mov [rdi+Context.rip], rax
+  mov qword [rdi+Context.cs], SEL.userCode64+3
+  mov qword [rdi+Context.rflags], 0x202
+  mov rax, [rsp+ThreadConfig.stack_top]
+  mov [rdi+Context.rsp], rax
+  mov qword [rdi+Context.ss], SEL.userData64+3
+  mov rax, [rsp+ThreadConfig.stack_low]
+  mov [r15+Task.stack_low], rax
+  mov rax, [rsp+ThreadConfig.stack_limit]
+  mov [r15+Task.stack_limit], rax
+  mov rax, [rsp+ThreadConfig.brk_base]
+  mov [r15+Task.brk_base], rax
+  mov [r15+Task.brk_current], rax
+  mov qword [r15+Task.state], TASK_SUSPENDED
+
+  xor r14d, r14d
   .grant:
-    cmp r13, rbx
-    jae .parent_capability
-    ;// Записи по 16 байт: индекс удваивается для qword addressing.
-    mov rax, r13
+    cmp r14, [rsp+ThreadConfig.grant_count]
+    jae .parent_cap
+    mov rax, r14
     shl rax, 4
-    mov rsi, [rsp+32+rax+SpawnGrant.handle]
-    mov rdx, [rsp+32+rax+SpawnGrant.rights]
-    mov rdi, r12
+    mov rsi, [rsp+ThreadConfig.grants+rax+SpawnGrant.handle]
+    mov rdx, [rsp+ThreadConfig.grants+rax+SpawnGrant.rights]
+    mov rdi, r15
     call capability_clone_current
     test rax, rax
-    jz .discard_bad_grant
-    inc r13
+    jz .bad_grant
+    inc r14
     jmp .grant
-
-  .parent_capability:
+  .parent_cap:
   mov edi, [current_task]
   call task_by_index
   mov rdi, rax
   mov esi, CAP_PROCESS
-  mov rdx, [rsp+96]
-  mov ecx, CAP_SEND+CAP_WAIT
+  mov rdx, [rsp+ThreadConfig.bytes]
+  mov ecx, CAP_WAIT+CAP_CONTROL
   call capability_insert_task
   test rax, rax
   jz .discard_no_memory
-  mov r13, rax                    ;// вернуть handle после commit IRQ transfer
+  mov r14, rax
   mov edi, [current_task]
   call task_by_index
-  mov rdi, r12                    ;// child
-  mov rsi, rax                    ;// parent
+  mov rdi, r15
+  mov rsi, rax
   call device_commit_irq_transfers
-  mov rax, r13
+  mov rax, r14
   jmp .done
 
-  .discard_bad_grant:
-  mov r15, ERR_BAD_HANDLE
-  jmp .discard_child
+  .bad_grant:
+  mov r14, ERR_BAD_HANDLE
+  jmp .discard_with_error
   .discard_no_memory:
-  mov r15, ERR_NO_MEMORY
-  .discard_child:
-  mov rdi, r12
-  mov esi, r14d
+  mov r14, ERR_NO_MEMORY
+  .discard_with_error:
+  mov rdi, r15
+  mov rsi, [rsp+ThreadConfig.bytes+8]
   call task_discard_new
-  mov rax, r15
+  mov rax, r14
   jmp .done
-  .bad_handle:
-  mov rax, ERR_BAD_HANDLE
-  jmp .done
-  .not_found:
-  mov rax, ERR_NOENT
-  jmp .done
+  .discard:
+  mov rdi, r15
+  mov rsi, [rsp+ThreadConfig.bytes+8]
+  call task_discard_new
   .no_memory:
   mov rax, ERR_NO_MEMORY
+  jmp .done
+  .bad:
+  mov rax, ERR_BAD_HANDLE
   jmp .done
   .fault:
   mov rax, ERR_FAULT
@@ -253,12 +529,57 @@ function syscall_spawn
   .invalid:
   mov rax, ERR_INVALID
   .done:
-  add rsp, 104
+  add rsp, ThreadConfig.bytes+24
   pop r15
   pop r14
   pop r13
   pop r12
   pop rbx
+endf
+
+;// Сделать suspended process доступным планировщику. RDI=process handle.
+function syscall_thread_start
+  push rbx
+  sub rsp, 8
+  mov esi, CAP_PROCESS
+  mov edx, CAP_CONTROL
+  call capability_lookup
+  test rax, rax
+  jz .bad
+  mov rdi, rax
+  call task_from_token
+  test rax, rax
+  jz .bad
+  cmp qword [rax+Task.state], TASK_SUSPENDED
+  jne .busy
+  mov qword [rax+Task.state], TASK_RUNNABLE
+  xor eax, eax
+  jmp .done
+  .bad:
+  mov rax, ERR_BAD_HANDLE
+  jmp .done
+  .busy:
+  mov rax, ERR_BUSY
+  .done:
+  add rsp, 8
+  pop rbx
+endf
+
+;// Вернуть user mapping initramfs, доступный только владельцу CAP_BOOTFS.
+;// RDI=bootfs handle. RAX=base/error, RDX=used bytes.
+function syscall_bootfs_info
+  mov esi, CAP_BOOTFS
+  mov edx, CAP_READ
+  call capability_lookup
+  test rax, rax
+  jz .bad
+  mov rax, USER.bootfsBase
+  mov edx, [initramfs_used]
+  jmp .done
+  .bad:
+  mov rax, ERR_BAD_HANDLE
+  xor edx, edx
+  .done:
 endf
 
 ;// RDI указывает на единый Context. RAX=контекст для возобновления.
@@ -274,10 +595,6 @@ function syscall_dispatch
   je .log
   cmp rax, SYS_YIELD
   je .yield
-  cmp rax, SYS_SEND
-  je .send
-  cmp rax, SYS_RECV
-  je .receive
   cmp rax, SYS_EXIT
   je .exit
   cmp rax, SYS_IO_READ8
@@ -286,14 +603,34 @@ function syscall_dispatch
   je .io_write8
   cmp rax, SYS_IRQ_WAIT
   je .irq_wait
-  cmp rax, SYS_SPAWN
-  je .spawn
   cmp rax, SYS_WAIT
   je .wait
   cmp rax, SYS_BRK
   je .brk
   cmp rax, SYS_MEM_INFO
   je .memory_info
+  cmp rax, SYS_ENDPOINT_CREATE
+  je .endpoint_create
+  cmp rax, SYS_IPC_SEND
+  je .endpoint_send
+  cmp rax, SYS_IPC_RECV
+  je .endpoint_receive
+  cmp rax, SYS_SPACE_CREATE
+  je .space_create
+  cmp rax, SYS_FRAME_ALLOC
+  je .frame_alloc
+  cmp rax, SYS_FRAME_WRITE
+  je .frame_write
+  cmp rax, SYS_SPACE_MAP
+  je .space_map
+  cmp rax, SYS_THREAD_CREATE
+  je .thread_create
+  cmp rax, SYS_THREAD_START
+  je .thread_start
+  cmp rax, SYS_CAP_CLOSE
+  je .cap_close
+  cmp rax, SYS_BOOTFS_INFO
+  je .bootfs_info
   mov qword [r12+Context.rax], ERR_NOSYS
   jmp .resume_current
 
@@ -301,31 +638,6 @@ function syscall_dispatch
   mov rdi, [r12+Context.rdi]
   mov rsi, [r12+Context.rsi]
   call syscall_log
-  mov [r12+Context.rax], rax
-  jmp .resume_current
-
-  .send:
-  mov rdi, [r12+Context.rdi]
-  mov rsi, [r12+Context.rsi]
-  call ipc_send
-  mov [r12+Context.rax], rax
-  jmp .resume_current
-
-  .receive:
-  call ipc_receive
-  test rcx, rcx
-  jz .switch
-  mov [r12+Context.rax], rax
-  mov [r12+Context.rdx], rdx
-  jmp .resume_current
-
-  .spawn:
-  mov rdi, [r12+Context.rdi]
-  mov rsi, [r12+Context.rsi]
-  mov rdx, [r12+Context.rdx]
-  mov rcx, [r12+Context.r10]
-  mov r8, [r12+Context.r8]
-  call syscall_spawn
   mov [r12+Context.rax], rax
   jmp .resume_current
 
@@ -346,6 +658,85 @@ function syscall_dispatch
   .memory_info:
   mov rax, [pmm_free_count]
   mov [r12+Context.rax], rax
+  jmp .resume_current
+
+  .endpoint_create:
+  mov rdi, [r12+Context.rdi]
+  call syscall_endpoint_create
+  mov [r12+Context.rax], rax
+  jmp .resume_current
+
+  .endpoint_send:
+  mov rdi, [r12+Context.rdi]
+  mov rsi, [r12+Context.rsi]
+  call ipc_endpoint_send
+  mov [r12+Context.rax], rax
+  jmp .resume_current
+
+  .endpoint_receive:
+  mov rdi, [r12+Context.rdi]
+  mov rsi, [r12+Context.rsi]
+  call ipc_endpoint_receive
+  test rcx, rcx
+  jz .switch
+  mov [r12+Context.rax], rax
+  jmp .resume_current
+
+  .space_create:
+  mov rdi, [r12+Context.rdi]
+  call syscall_space_create
+  mov [r12+Context.rax], rax
+  jmp .resume_current
+
+  .frame_alloc:
+  mov rdi, [r12+Context.rdi]
+  call syscall_frame_alloc
+  mov [r12+Context.rax], rax
+  jmp .resume_current
+
+  .frame_write:
+  mov rdi, [r12+Context.rdi]
+  mov rsi, [r12+Context.rsi]
+  mov rdx, [r12+Context.rdx]
+  mov rcx, [r12+Context.r10]
+  call syscall_frame_write
+  mov [r12+Context.rax], rax
+  jmp .resume_current
+
+  .space_map:
+  mov rdi, [r12+Context.rdi]
+  mov rsi, [r12+Context.rsi]
+  mov rdx, [r12+Context.rdx]
+  mov rcx, [r12+Context.r10]
+  call syscall_space_map
+  mov [r12+Context.rax], rax
+  jmp .resume_current
+
+  .thread_create:
+  mov rdi, [r12+Context.rdi]
+  mov rsi, [r12+Context.rsi]
+  mov rdx, [r12+Context.rdx]
+  call syscall_thread_create
+  mov [r12+Context.rax], rax
+  jmp .resume_current
+
+  .thread_start:
+  mov rdi, [r12+Context.rdi]
+  call syscall_thread_start
+  mov [r12+Context.rax], rax
+  jmp .resume_current
+
+  .cap_close:
+  mov rdi, [r12+Context.rdi]
+  call capability_close_current
+  mov [r12+Context.rax], rax
+  jmp .resume_current
+
+  .bootfs_info:
+  mov rdi, [r12+Context.rdi]
+  call syscall_bootfs_info
+  mov [r12+Context.rax], rax
+  mov [r12+Context.rdx], rdx
   jmp .resume_current
 
   .io_read8:

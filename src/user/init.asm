@@ -2,64 +2,87 @@ format ELF64 executable 3
 entry start
 include "abi.inc"
 
-ROOT_CAP = 1
-IRQ_CAP  = 2
-IO_CAP   = 3
+;// Handle 1 — собственный inbox endpoint каждого процесса.
+;// Handle 2 — endpoint procd, переданный bootstrap-политикой.
+SELF_EP  = 1
+PROCD_EP = 2
 FAULT_EXIT_CODE = 128+14
 
 segment readable executable
 start:
   log init_text, init_text.size
 
-  ;// Сначала постоянный IPC-сервис. Возвращённая process capability содержит
-  ;// CAP_SEND|CAP_WAIT; клиенту передаём только ослабленное право CAP_SEND.
-  lea rsi, [service_name]
-  mov edx, service_name.size
-  xor r10d, r10d
-  xor r8d, r8d
+  ;// Nameserver — первый обычный сервис. Его endpoint возвращает procd как
+  ;// capability и затем ослабленно передаётся service/client.
+  lea rdi, [nameserver_name]
+  mov esi, nameserver_name.size
+  xor edx, edx
+  xor ecx, ecx
   call spawn
   test rax, rax
   js init_failed
-  mov r12, rax
+  mov rdi, rax
+  call close_handle                 ;// nameserver долгоживущий
+  mov r12, rdx                      ;// endpoint nameserver
 
-  mov [one_grant.handle], r12
-  mov qword [one_grant.rights], CAP_SEND
-  lea rsi, [client_name]
-  mov edx, client_name.size
-  lea r10, [one_grant]
-  mov r8d, 1
+  lea rdi, [service_name]
+  mov esi, service_name.size
+  mov rdx, r12
+  mov ecx, CAP_SEND
+  call spawn
+  test rax, rax
+  js init_failed
+  mov rdi, rax
+  call close_handle                 ;// service долгоживущий
+  mov rdi, rdx
+  call close_handle                 ;// его endpoint найдём через nameserver
+
+  lea rdi, [client_name]
+  mov esi, client_name.size
+  mov rdx, r12
+  mov ecx, CAP_SEND
   call spawn
   test rax, rax
   js init_failed
   mov r13, rax
+  mov rdi, rdx
+  call close_handle
 
-  lea rsi, [memory_name]
-  mov edx, memory_name.size
-  xor r10d, r10d
-  xor r8d, r8d
+  lea rdi, [memory_name]
+  mov esi, memory_name.size
+  xor edx, edx
+  xor ecx, ecx
   call spawn
   test rax, rax
   js init_failed
   mov r14, rax
+  mov rdi, rdx
+  call close_handle
 
-  lea rsi, [isolation_name]
-  mov edx, isolation_name.size
-  xor r10d, r10d
-  xor r8d, r8d
+  lea rdi, [isolation_name]
+  mov esi, isolation_name.size
+  xor edx, edx
+  xor ecx, ecx
   call spawn
   test rax, rax
   js init_failed
   mov r15, rax
+  mov rdi, rdx
+  call close_handle
 
-  ;// Драйвер получает ровно IRQ1 и read-only диапазон портов, причём handles
-  ;// внутри ребёнка будут 1 и 2 независимо от номеров capabilities init.
-  lea rsi, [keyboard_name]
-  mov edx, keyboard_name.size
-  lea r10, [driver_grants]
-  mov r8d, 2
+  ;// Выбор IRQ/I/O capability для keyboard — bootstrap policy procd. Init не
+  ;// владеет железом и потому не может случайно расширить права драйвера.
+  lea rdi, [keyboard_name]
+  mov esi, keyboard_name.size
+  xor edx, edx
+  xor ecx, ecx
   call spawn
   test rax, rax
   js init_failed
+  mov rdi, rax
+  call close_handle
+  mov rdi, rdx
+  call close_handle
 
   mov rdi, r13
   call wait_success
@@ -75,8 +98,8 @@ start:
   jne init_failed
   log isolation_ok_text, isolation_ok_text.size
 
-  ;// Первый ребёнок прогревает slab. Затем сравниваем число свободных кадров
-  ;// до и после полного create → exit → wait → teardown второго процесса.
+  ;// Прогрев slab отделён от измерения. Второй create → exit → wait должен
+  ;// вернуть frames address space, stack, page tables и kernel stack.
   call spawn_lifecycle
   test rax, rax
   js init_failed
@@ -99,23 +122,85 @@ start:
   log lifecycle_ok_text, lifecycle_ok_text.size
 
   log all_ok_text, all_ok_text.size
-init_idle:
+.idle:
   system_call SYS_YIELD
-  jmp init_idle
+  jmp .idle
 
-;// Вход: RSI=name, EDX=len, R10=grants, R8=count. Выход: process handle.
+;// RPC к procd.
+;// RDI=name, RSI=len, RDX=optional cap, RCX=rights.
+;// RAX=process cap/error, RDX=child endpoint cap.
 spawn:
-  mov eax, SYS_SPAWN
-  mov edi, ROOT_CAP
-  syscall
+  push rbx
+  push r12
+  push r13
+  push r14
+  push r15
+  sub rsp, 8
+  mov r12, rdi
+  mov r13, rsi
+  mov r14, rdx
+  mov r15, rcx
+  test r13, r13
+  jz .invalid
+  cmp r13, 23
+  ja .invalid
+  lea rdi, [rpc_message]
+  mov ecx, IpcMessage.bytes*2
+  xor eax, eax
+  rep stosb
+  mov qword [rpc_message+IpcMessage.words], PROCD_SPAWN
+  lea rdi, [rpc_message+IpcMessage.words+8]
+  mov rsi, r12
+  mov rcx, r13
+  rep movsb
+  mov qword [rpc_message+IpcMessage.cap_count], 1
+  mov qword [rpc_message+IpcMessage.caps+IpcCap.handle], SELF_EP
+  mov qword [rpc_message+IpcMessage.caps+IpcCap.rights], CAP_SEND
+  test r14, r14
+  jz .send
+  mov qword [rpc_message+IpcMessage.cap_count], 2
+  mov qword [rpc_message+IpcMessage.caps+IpcCap.bytes+IpcCap.handle], r14
+  mov qword [rpc_message+IpcMessage.caps+IpcCap.bytes+IpcCap.rights], r15
+.send:
+  ipc_send PROCD_EP, rpc_message
+  test rax, rax
+  jnz .done
+  ipc_receive SELF_EP, rpc_response
+  test rax, rax
+  jnz .done
+  mov rax, qword [rpc_response+IpcMessage.words]
+  test rax, rax
+  js .done
+  cmp qword [rpc_response+IpcMessage.cap_count], 2
+  jne .invalid
+  mov rax, qword [rpc_response+IpcMessage.caps+IpcCap.handle]
+  mov rdx, qword [rpc_response+IpcMessage.caps+IpcCap.bytes+IpcCap.handle]
+  jmp .done
+.invalid:
+  mov rax, -22
+.done:
+  add rsp, 8
+  pop r15
+  pop r14
+  pop r13
+  pop r12
+  pop rbx
   ret
 
 spawn_lifecycle:
-  lea rsi, [lifecycle_name]
-  mov edx, lifecycle_name.size
-  xor r10d, r10d
-  xor r8d, r8d
-  jmp spawn
+  lea rdi, [lifecycle_name]
+  mov esi, lifecycle_name.size
+  xor edx, edx
+  xor ecx, ecx
+  call spawn
+  test rax, rax
+  js .done
+  push rax
+  mov rdi, rdx
+  call close_handle
+  pop rax
+.done:
+  ret
 
 wait_success:
   system_call SYS_WAIT
@@ -131,12 +216,20 @@ wait_lifecycle:
   mov eax, 1
   ret
 
+close_handle:
+  test rdi, rdi
+  jz .done
+  mov eax, SYS_CAP_CLOSE
+  syscall
+.done:
+  ret
+
 init_failed:
   log failed_text, failed_text.size
   exit_process 1
 
 segment readable writeable
-init_text db "init: launching user services and drivers from initramfs", 10
+init_text db "init: launching services through user-space procd", 10
 .size = $-init_text
 isolation_ok_text db "VARANIA:ISOLATION_OK", 10
 .size = $-isolation_ok_text
@@ -147,6 +240,8 @@ all_ok_text db "VARANIA:MICROKERNEL_OK", 10
 failed_text db "init: integration test failed", 10
 .size = $-failed_text
 
+nameserver_name db "nameserver.elf"
+.size = $-nameserver_name
 service_name db "service.elf"
 .size = $-service_name
 client_name db "client.elf"
@@ -161,9 +256,5 @@ lifecycle_name db "lifecycle_child.elf"
 .size = $-lifecycle_name
 
 align 8
-one_grant:
-  .handle dq 0
-  .rights dq 0
-driver_grants:
-  dq IRQ_CAP, CAP_WAIT
-  dq IO_CAP, CAP_READ
+rpc_message rb IpcMessage.bytes
+rpc_response rb IpcMessage.bytes

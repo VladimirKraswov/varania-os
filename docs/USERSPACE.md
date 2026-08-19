@@ -1,30 +1,41 @@
 # User space, initramfs и ELF64
 
-## Зачем здесь отдельный initramfs
+## Почему loader находится в ring 3
 
-На раннем этапе полноценная VFS смешала бы два разных учебных вопроса: загрузку
-процесса и устройство файловой системы. Поэтому raw image содержит небольшой
-read-only архив. Он даёт именованные ELF-файлы и строгие границы, но не обещает
-каталоги, запись, permissions или persistent storage.
+Формат executable, поиск файла и выбор набора сервисов — политика. Микроядру
+достаточно уметь создать AddressSpace, выделить/заполнить/map-ить frames и
+создать suspended thread. Поэтому обычный путь выглядит так:
 
-`scripts/mkinitramfs.py` всегда создаёт 65536 байт и нулевое заполнение, поэтому
-одни и те же входные ELF дают воспроизводимый образ.
+```text
+init --spawn RPC--> procd --BOOTFS--> initramfs entry
+                         |
+                         +--> validate ELF64
+                         +--> SPACE_CREATE
+                         +--> FRAME_ALLOC / FRAME_WRITE / SPACE_MAP
+                         +--> ENDPOINT_CREATE
+                         +--> THREAD_CREATE(grants) / THREAD_START
+                         +--> reply(process cap, endpoint cap)
+```
 
-## Формат initramfs
+Kernel использует встроенный ELF loader ровно один раз для `procd.elf` — это
+неустранимая bootstrap-ступень до появления первого user loader.
 
-Все числа little-endian.
+## Initramfs
+
+`scripts/mkinitramfs.py` создаёт детерминированный образ ровно 65536 байт.
+Числа little-endian:
 
 ```c
 struct Header {                 /* 24 bytes */
-    char     magic[8];          /* "VARNIR01" */
+    char magic[8];              /* "VARNIR01" */
     uint32_t version;           /* 1 */
     uint32_t entry_count;       /* <= 32 */
-    uint32_t total_size;        /* значимая часть архива */
+    uint32_t total_size;
     uint32_t reserved;
 };
 
 struct Entry {                  /* 48 bytes */
-    char     name[32];          /* NUL-terminated ASCII */
+    char name[32];              /* NUL-terminated ASCII */
     uint32_t offset;            /* 16-byte aligned */
     uint32_t size;
     uint32_t flags;
@@ -32,38 +43,88 @@ struct Entry {                  /* 48 bytes */
 };
 ```
 
-Ядро валидирует magic/version/count/total size до первого поиска. При поиске
-повторно проверяются `offset+size` и точное имя.
+Kernel проверяет envelope архива до bootstrap и отображает все 64 KiB procd
+как R+NX. Procd повторно проверяет точное имя и `offset+size <= total_size`.
+Ни один другой процесс не получает bootfs capability/mapping.
 
 ## Поддерживаемый ELF64
 
-Загрузчик принимает только:
+`procd` принимает намеренно небольшой и проверяемый поднабор:
 
-- ELF class 64, little-endian, current version;
-- `ET_EXEC`, machine `EM_X86_64`;
-- до 16 program headers размером 56 байт;
+- class 64, little-endian, `ET_EXEC`, `EM_X86_64`;
+- до 16 program headers по 56 байт;
+- только `PT_NULL` и `PT_LOAD`;
 - `PT_LOAD` в `0x10000..0x3FFFFFFF`;
-- совпадающее page offset у `p_offset` и `p_vaddr`;
-- `p_filesz <= p_memsz` и диапазоны внутри файла;
-- readable segments, но никогда одновременно W и X;
-- entry внутри executable `PT_LOAD`;
-- неперекрывающиеся 4-KiB pages сегментов.
+- `p_filesz <= p_memsz`, file ranges внутри initramfs entry;
+- одинаковый page offset `p_offset`/`p_vaddr`;
+- readable segment и никогда одновременно writable+executable;
+- entry внутри executable segment.
 
-Каждая страница сначала выделяется и обнуляется. Затем `p_filesz` копируется
-через HHDM, поэтому хвост до `p_memsz` автоматически становится BSS. Флаги:
+На каждую страницу procd получает zero-filled Frame, копирует пересечение с
+файловой частью и передаёт frame в `SPACE_MAP`. Поэтому BSS и хвост page
+остаются нулевыми. Kernel независимо запрещает W+X.
 
-| ELF | Page table |
+| ELF flags | Mapping |
 |---|---|
-| `PF_R|PF_X` | user, read-only, executable |
-| `PF_R|PF_W` | user, writable, NX |
-| `PF_R` | user, read-only, NX |
+| `PF_R|PF_X` | R+X |
+| `PF_R|PF_W` | R+W+NX |
+| `PF_R` | R+NX |
 
-PIE, `PT_INTERP`, relocations, shared libraries и demand-paging исполняемого
-файла пока не поддерживаются.
+PIE, `PT_INTERP`, relocations, shared libraries и demand paging executable пока
+не поддерживаются.
 
-## Сборка программы
+## Bootstrap capabilities procd
 
-Минимальный пример:
+| Handle | Capability | Права |
+|---:|---|---|
+| 1 | system object factory | `CREATE` |
+| 2 | control endpoint | `SEND|RECV` |
+| 3 | bootfs mapping | `READ` |
+| 4 | IRQ1 | `WAIT` |
+| 5 | ports `0x60..0x64` | `READ` |
+
+Procd передаёт init свой inbox как handle 1 и ослабленный control endpoint как
+handle 2. Каждый последующий процесс также получает собственный endpoint как
+handle 1. Дополнительные grants идут с handle 2 в порядке `ThreadConfig`.
+
+IRQ1 уникален: при создании keyboard driver он перемещается из procd. I/O range
+копируется read-only. Ни init, ни nameserver не владеют hardware capabilities.
+
+## Протокол procd
+
+Request — `IpcMessage`:
+
+```text
+words[0] = PROCD_SPAWN
+words[1..3] = NUL-terminated filename, максимум 23 байта
+cap[0] = reply endpoint с SEND
+cap[1] = необязательный attenuated grant
+```
+
+Success reply содержит `words[0]=0`, process capability с `WAIT` и endpoint
+нового процесса с `SEND`. Обе передаются с `CAP_MOVE`, поэтому procd не копит
+handles. Ошибка возвращается в `words[0]` без capabilities.
+
+## Init, nameserver и сервисы
+
+Init запускает nameserver, service, client, memory/isolation/lifecycle tests и
+keyboard driver. Чтобы дать service/client доступ к registry, init передаёт им
+только `CAP_SEND` к endpoint nameserver.
+
+Service регистрирует собственный inbox capability. Client делает lookup,
+передавая reply endpoint; nameserver возвращает ослабленный service endpoint.
+Process capability сервиса клиент не видит. Этот сценарий одновременно
+проверяет:
+
+- endpoint как объект, независимый от процесса;
+- передачу capabilities через очередь;
+- attenuated rights;
+- явный reply channel;
+- закрытие временных handles.
+
+## Добавление программы
+
+Минимальный ELF:
 
 ```asm
 format ELF64 executable 3
@@ -80,42 +141,20 @@ message db "hello from ring 3", 10
 .size = $-message
 ```
 
-Чтобы добавить программу:
+Порядок:
 
 1. создать `src/user/name.asm`;
-2. добавить `name` в `USER_PROGRAMS` Makefile;
-3. при необходимости вызвать её из `src/user/init.asm`;
-4. выполнить `make clean && make check` для проверки ELF/initramfs;
-5. добавить QEMU-маркер, если программа доказывает новый инвариант.
+2. добавить `name` в `USER_PROGRAMS` в Makefile;
+3. добавить spawn policy в init или RPC другого supervisor;
+4. передать только минимальные capabilities;
+5. добавить наблюдаемый тестовый marker;
+6. выполнить `make clean && make test`.
 
-## Роль user/init
+## Встроенные проверки
 
-Kernel знает только имя `init.elf`. Bootstrap capabilities init:
-
-| Handle | Объект | Права |
-|---:|---|---|
-| 1 | system | `SPAWN` |
-| 2 | IRQ1 | `WAIT` |
-| 3 | ports `0x60..0x64` | `READ` |
-
-Init запускает IPC service, client, memory/isolation/lifecycle tests и keyboard
-driver. Client получает только `CAP_SEND` к service. Driver получает IRQ1 и
-I/O range; IRQ при этом перемещается из init. Init ждёт конечные процессы и
-оставляет service/driver работающими.
-
-Такой bootstrap уже отделяет mechanism от policy: ядро реализует spawn, wait,
-memory и capabilities, но состав системы задаёт обычная программа ring 3.
-
-## Встроенные проверки user space
-
-`memory_test.elf` намеренно имеет многостраничные RX и RW segments, проверяет
-BSS, касается трёх дополнительных stack pages, растит и уменьшает heap и
-убеждается, что повторно выданная page обнулена.
-
-`isolation_test.elf` читает supervisor HHDM. Ожидаемый результат — #PF и status
-142 только у этого процесса.
-
-`lifecycle_child.elf` завершается со status 37. Init сначала прогревает slab,
-затем сравнивает `SYS_MEM_INFO` до и после второго полного цикла. Равенство
-доказывает возврат user frames, page tables и kernel stack; повторное создание
-проверяет reuse process slot с новым generation.
+- `memory_test.elf`: multi-page RX/RW, BSS, stack growth, heap grow/shrink и
+  zero-on-reuse;
+- `isolation_test.elf`: чтение supervisor HHDM, ожидаемый #PF/status 142;
+- `lifecycle_child.elf`: status 37 и сравнение PMM frame count после teardown;
+- `service/client/nameserver`: endpoint queue и capability transfer;
+- `keyboard.elf`: реальный IRQ1, отправляемый тестом через QMP.

@@ -9,7 +9,7 @@ INITRAMFS_IMAGE := INITRAMFS.BIN
 DISK_IMAGE   := VOS.VHD
 
 USER_BUILD := build/user
-USER_PROGRAMS := init service client keyboard memory_test isolation_test lifecycle_child
+USER_PROGRAMS := procd init nameserver service client keyboard memory_test isolation_test lifecycle_child
 USER_ELFS := $(addprefix $(USER_BUILD)/,$(addsuffix .elf,$(USER_PROGRAMS)))
 
 BOOT_SOURCES := src/boot/boot.asm src/boot/disk.inc \
@@ -17,7 +17,7 @@ BOOT_SOURCES := src/boot/boot.asm src/boot/disk.inc \
 KERNEL_SOURCES := src/kernel/kernel.asm src/const.inc \
                   $(wildcard src/kernel/amd64/*.inc)
 
-.PHONY: all build check smoke test-isolation test-lifecycle test run debug clean help
+.PHONY: all build check smoke test-capabilities test-isolation test-lifecycle test run debug clean help
 
 all: build
 
@@ -52,7 +52,10 @@ test-isolation: check
 test-lifecycle: check
 	python3 tests/test_process_lifecycle.py
 
-test: smoke test-isolation test-lifecycle
+test-capabilities: check
+	python3 tests/test_capability_ipc.py
+
+test: smoke test-capabilities test-isolation test-lifecycle
 
 run: check
 	$(QEMU_RUNNER)
@@ -70,6 +73,7 @@ help:
 	  'make build  — собрать загрузчик, ядро, ELF, initramfs и raw-образ' \
 	  'make run    — проверить образ и запустить QEMU' \
 	  'make test   — статические проверки + headless smoke-тест' \
+	  'make test-capabilities — отдельно проверить endpoint/capability transfer' \
 	  'make test-isolation — отдельный QEMU-тест памяти и изоляции' \
 	  'make test-lifecycle — отдельный QEMU-тест create/exit/wait/teardown' \
 	  'make debug  — QEMU с журналом прерываний/ошибок' \

@@ -4,14 +4,15 @@ include "abi.inc"
 
 segment readable executable
 start:
-  ;// init передаёт IRQ capability как handle 1, I/O range — как handle 2.
+  ;// Handle 1 — inbox, procd передаёт IRQ capability как handle 2,
+  ;// I/O range — как handle 3.
   log ready_text, ready_text.size
 .wait:
   mov eax, SYS_IRQ_WAIT
-  mov edi, 1
+  mov edi, 2
   syscall
   mov eax, SYS_IO_READ8
-  mov edi, 2
+  mov edi, 3
   xor esi, esi
   syscall
   log handled_text, handled_text.size

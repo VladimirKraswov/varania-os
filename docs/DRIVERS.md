@@ -10,16 +10,18 @@
 4. выдать минимальный диапазон I/O-портов с нужными правами;
 5. запустить задачу без IOPL и без доступа к HHDM.
 
-Kernel выдаёт IRQ/I/O capabilities только первому `init`. Затем `init.asm`
-запускает `keyboard.elf` через `SYS_SPAWN` и передаёт:
+Kernel выдаёт IRQ/I/O capabilities только bootstrap-процессу `procd`. По
+запросу init user loader создаёт `keyboard.elf` через low-level object ABI и
+передаёт ему:
 
 | Handle | Тип | Объект | Права |
 |---:|---|---|---|
-| 1 | IRQ | IRQ1 | wait |
-| 2 | I/O ports | `0x60..0x64` | read |
+| 1 | Endpoint | inbox | send + receive |
+| 2 | IRQ | IRQ1 | wait |
+| 3 | I/O ports | `0x60..0x64` | read |
 
-IRQ capability имеет move-семантику при spawn: после успешного commit handle
-удаляется у init, а IRQ router начинает указывать на generation-safe token
+IRQ capability имеет уникальную move-семантику при `THREAD_CREATE`: после
+успешного commit handle удаляется у procd, а IRQ router указывает на token
 драйвера. I/O capability в текущей модели можно копировать с attenuation.
 
 ## Цикл PS/2-драйвера
@@ -27,11 +29,11 @@ IRQ capability имеет move-семантику при spawn: после ус�
 ```asm
 .wait:
   mov eax, SYS_IRQ_WAIT
-  mov edi, 1
+  mov edi, 2
   syscall
 
   mov eax, SYS_IO_READ8
-  mov edi, 2
+  mov edi, 3
   xor esi, esi              ; base + 0 = 0x60
   syscall
   ; RAX содержит scan code
@@ -50,8 +52,8 @@ IRQ маскируется stub-ом и открывается следующи�
 4. Создать отдельный `src/user/name.asm` как ELF64 и добавить его в initramfs.
 5. Выдать IRQ/I/O capabilities init один раз при bootstrap или через будущий
    device manager.
-6. Передать capabilities драйверу в grant list `SYS_SPAWN`.
-7. Передать process capability нужного сервиса для IPC-протокола.
+6. Передать capabilities в `ThreadConfig.grants` user-space loader-а.
+7. Передать endpoint нужного сервиса, а не process capability.
 8. Добавить QEMU-тест нормального события и тест отказа в чужом порту.
 
 ## Что потребуется для PCI/MMIO

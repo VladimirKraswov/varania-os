@@ -162,8 +162,8 @@ leaf_function device_release_task
     jb .scan
 end_leaf
 
-;// IRQ capability уникальна: после успешного SYS_SPAWN она переезжает к
-;// ребёнку, в отличие от обычных копируемых process/I/O capabilities.
+;// IRQ capability уникальна: после успешного THREAD_CREATE она переезжает к
+;// ребёнку, в отличие от обычных копируемых I/O/endpoint capabilities.
 ;// RDI=child TCB, RSI=parent TCB.
 function device_commit_irq_transfers
   push rbx

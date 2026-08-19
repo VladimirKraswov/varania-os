@@ -61,9 +61,12 @@ smoke-test не вызывал CPU exception. Теперь 32 stubs генери
 
 Промежуточное микроядро создавало четыре задачи прямо из labels в
 `kernel.asm`. Это доказывало ring 3, но смешивало kernel mechanism и boot policy.
-Новый этап добавил отдельный raw initramfs, строгий ELF64 loader и system
-capability. Ядро теперь знает только `init.elf`; состав сервисов определяет
-user/init.
+Первый этап добавил raw initramfs, строгий ELF64 loader и system capability:
+ядро знало `init.elf`, а состав сервисов определял user/init. Следующий этап
+сдвинул границу ещё дальше: kernel bootstrap-ит только `procd.elf`, а procd в
+ring 3 проверяет и загружает все остальные ELF через space/frame/map/thread.
+Nameserver и endpoint capability transfer заменили передачу process cap как
+IPC-канала.
 
 Переход потребовал не только парсера ELF, но и полного lifecycle: частичная
 ошибка загрузки обязана откатить frames, exit нельзя разрушать на текущем стеке,

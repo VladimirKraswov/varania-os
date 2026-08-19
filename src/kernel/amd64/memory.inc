@@ -206,6 +206,98 @@ function vmm_translate_user
   pop rbx
 endf
 
+;// Безопасно скопировать данные из произвольного user address space.
+;// RDI=kernel destination, RSI=pml4, RDX=user source, RCX=size. RAX=1/0.
+;// Копирование побайтное намеренно: код прост для аудита и корректно проходит
+;// границы страниц. Оптимизация блоками появится только после тестов механизма.
+function vmm_copy_from_user_space
+  push rbx
+  push r12
+  push r13
+  push r14
+  push r15
+  sub rsp, 8
+  mov r12, rdi
+  mov r13, rsi
+  mov r14, rdx
+  mov r15, rcx
+  .byte:
+    test r15, r15
+    jz .success
+    mov rax, USER.limit
+    cmp r14, rax
+    jae .failed
+    mov rdi, r13
+    mov rsi, r14
+    call vmm_translate_user
+    test rax, rax
+    jz .failed
+    hhdm_address rbx, rax
+    mov al, [rbx]
+    mov [r12], al
+    inc r12
+    inc r14
+    dec r15
+    jmp .byte
+  .success:
+  mov eax, 1
+  jmp .done
+  .failed:
+  xor eax, eax
+  .done:
+  add rsp, 8
+  pop r15
+  pop r14
+  pop r13
+  pop r12
+  pop rbx
+endf
+
+;// Безопасно скопировать данные в произвольный user address space.
+;// RDI=pml4, RSI=user destination, RDX=kernel source, RCX=size. RAX=1/0.
+function vmm_copy_to_user_space
+  push rbx
+  push r12
+  push r13
+  push r14
+  push r15
+  sub rsp, 8
+  mov r12, rdi
+  mov r13, rsi
+  mov r14, rdx
+  mov r15, rcx
+  .byte:
+    test r15, r15
+    jz .success
+    mov rax, USER.limit
+    cmp r13, rax
+    jae .failed
+    mov rdi, r12
+    mov rsi, r13
+    call vmm_translate_user
+    test rax, rax
+    jz .failed
+    hhdm_address rbx, rax
+    mov al, [r14]
+    mov [rbx], al
+    inc r13
+    inc r14
+    dec r15
+    jmp .byte
+  .success:
+  mov eax, 1
+  jmp .done
+  .failed:
+  xor eax, eax
+  .done:
+  add rsp, 8
+  pop r15
+  pop r14
+  pop r13
+  pop r12
+  pop rbx
+endf
+
 ;// Совместимый со старым демо интерфейс: отобразить в текущем CR3.
 function vmm_map_page
   push r12
