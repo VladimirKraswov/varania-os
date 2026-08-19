@@ -4,7 +4,14 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
-QEMU_DISPLAY_ARGS=()
+QEMU_ARGS=(
+  -machine pc,accel=tcg
+  -cpu max
+  -m 128M
+  -drive "format=raw,file=$PROJECT_ROOT/VOS.VHD"
+  -drive "if=none,id=varania-nvme,format=raw,file=$PROJECT_ROOT/VARANIA.VAFS"
+  -device "nvme,drive=varania-nvme,serial=VARANIA0001"
+)
 
 if ! command -v "$QEMU_BIN" >/dev/null 2>&1; then
   echo "Не найден qemu-system-x86_64." >&2
@@ -31,16 +38,10 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
     if [[ "${VARANIA_QEMU_FULLSCREEN:-1}" != "0" ]]; then
       COCOA_OPTIONS+=",full-screen=on"
     fi
-    QEMU_DISPLAY_ARGS=(-display "$COCOA_OPTIONS")
+    QEMU_ARGS+=(-display "$COCOA_OPTIONS")
   fi
 fi
 
 exec "$QEMU_BIN" \
-  -machine pc,accel=tcg \
-  -cpu max \
-  -m 128M \
-  -drive "format=raw,file=$PROJECT_ROOT/VOS.VHD" \
-  -drive "if=none,id=varania-nvme,format=raw,file=$PROJECT_ROOT/VARANIA.VAFS" \
-  -device "nvme,drive=varania-nvme,serial=VARANIA0001" \
-  "${QEMU_DISPLAY_ARGS[@]}" \
+  "${QEMU_ARGS[@]}" \
   "$@"

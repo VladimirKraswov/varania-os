@@ -26,6 +26,9 @@ CD_OK = b"VARANIA:SHELL_CD_OK"
 TOUCH_OK = b"VARANIA:SHELL_TOUCH_OK"
 CAT_OK = b"VARANIA:SHELL_CAT_OK"
 WRITE_OK = b"VARANIA:SHELL_WRITE_OK"
+RUN_OK = b"VARANIA:SHELL_RUN_OK"
+DISK_ELF_OK = b"VARANIA:DISK_ELF_OK"
+SELFHOST_FASM_OK = b"VARANIA:SELFHOST_FASM_OK"
 
 
 class QmpClient:
@@ -191,21 +194,60 @@ def main() -> None:
         wait_debug(process, captured, CD_OK, 4)
         wait_debug(process, captured, PROMPT_READY, 7)
 
+        # hello.elf отсутствует в initramfs: успешный marker доказывает путь
+        # VaraniaFS READ -> shared capability -> procd ELF64 loader -> ring 3.
+        type_command(client, "cd bin")
+        wait_debug(process, captured, CD_OK, 5)
+        wait_debug(process, captured, PROMPT_READY, 8)
+        type_command(client, "run hello.elf")
+        wait_debug(process, captured, DISK_ELF_OK, 1)
+        wait_debug(process, captured, RUN_OK, 1)
+        wait_debug(process, captured, PROMPT_READY, 9)
+
+        # Официальный FASM 1.73.35 работает как обычный disk process: читает
+        # source через VFS, потоково пишет ELF и завершает работу. Затем shell
+        # загружает только что созданный ELF с того же тома.
+        # Четыре запуска превышают SESSION_MAX без FS_DETACH (shell уже занял
+        # первый slot), поэтому цикл одновременно проверяет возврат VFS window.
+        for compile_index in range(4):
+            type_command(client, "run fasm.elf /system/t.asm /system/build/t.elf")
+            wait_debug(process, captured, RUN_OK, 2 + compile_index)
+            wait_debug(process, captured, PROMPT_READY, 10 + compile_index)
+        type_command(client, "cd ..")
+        wait_debug(process, captured, CD_OK, 6)
+        wait_debug(process, captured, PROMPT_READY, 14)
+        type_command(client, "cd system")
+        wait_debug(process, captured, CD_OK, 7)
+        wait_debug(process, captured, PROMPT_READY, 15)
+        type_command(client, "cd build")
+        wait_debug(process, captured, CD_OK, 8)
+        wait_debug(process, captured, PROMPT_READY, 16)
+        type_command(client, "run t.elf")
+        wait_debug(process, captured, SELFHOST_FASM_OK, 1)
+        wait_debug(process, captured, RUN_OK, 6)
+        wait_debug(process, captured, PROMPT_READY, 17)
+        type_command(client, "cd /")
+        wait_debug(process, captured, CD_OK, 9)
+        wait_debug(process, captured, PROMPT_READY, 18)
+
         type_command(client, "mkdir demo")
         wait_debug(process, captured, MKDIR_OK, 1)
-        wait_debug(process, captured, PROMPT_READY, 8)
+        wait_debug(process, captured, PROMPT_READY, 19)
         type_command(client, "cd demo")
-        wait_debug(process, captured, CD_OK, 5)
-        wait_debug(process, captured, PROMPT_READY, 9)
+        wait_debug(process, captured, CD_OK, 10)
+        wait_debug(process, captured, PROMPT_READY, 20)
         type_command(client, "touch note")
         wait_debug(process, captured, TOUCH_OK, 1)
-        wait_debug(process, captured, PROMPT_READY, 10)
-        type_command(client, "write note hello")
+        wait_debug(process, captured, PROMPT_READY, 21)
+        type_command(client, "write note hel")
         wait_debug(process, captured, WRITE_OK, 1)
-        wait_debug(process, captured, PROMPT_READY, 11)
+        wait_debug(process, captured, PROMPT_READY, 22)
+        type_command(client, "append note lo")
+        wait_debug(process, captured, WRITE_OK, 2)
+        wait_debug(process, captured, PROMPT_READY, 23)
         type_command(client, "cat note")
         wait_debug(process, captured, CAT_OK, 2)
-        wait_debug(process, captured, PROMPT_READY, 12)
+        wait_debug(process, captured, PROMPT_READY, 24)
         type_command(client, "ls")
         wait_debug(process, captured, LS_OK, 2)
 
@@ -254,11 +296,23 @@ def main() -> None:
     )
     persisted = extracted.read_bytes() if get_file.returncode == 0 else b""
     extracted.unlink(missing_ok=True)
+    guest_elf_fd, guest_elf_name = tempfile.mkstemp(prefix="varania-selfhost-", dir="/tmp")
+    os.close(guest_elf_fd)
+    guest_elf = Path(guest_elf_name)
+    get_guest_elf = subprocess.run(
+        [sys.executable, str(ROOT / "tools/vafs/vafs.py"), "get",
+         str(NVME_IMAGE), "/system/build/t.elf", str(guest_elf)],
+        capture_output=True, text=True, check=False,
+    )
+    guest_image = guest_elf.read_bytes() if get_guest_elf.returncode == 0 else b""
+    guest_elf.unlink(missing_ok=True)
     if (verification.returncode or tree.returncode or get_file.returncode
-            or "note" not in tree.stdout or persisted != b"hello"):
+            or get_guest_elf.returncode or "note" not in tree.stdout
+            or persisted != b"hello" or not guest_image.startswith(b"\x7fELF\x02\x01\x01")):
         print(verification.stdout + verification.stderr + tree.stdout + tree.stderr, end="")
         print(get_file.stdout + get_file.stderr, end="")
-        print("ОШИБКА: COW-изменения не пережили остановку VM", file=sys.stderr)
+        print(get_guest_elf.stdout + get_guest_elf.stderr, end="")
+        print("ОШИБКА: COW/FASM-результаты не пережили остановку VM", file=sys.stderr)
         raise SystemExit(1)
 
     print(bytes(captured).decode("utf-8", errors="replace"), end="")

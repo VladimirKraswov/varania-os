@@ -25,7 +25,11 @@ Varania OS показывает устройство 64-битной capability-
 - собственная VaraniaFS: 4-KiB блоки, 64-битные адреса, extents, COW B+tree,
   CRC32C, две generation-копии superblock и постоянные изменения;
 - отдельный ring-3 VFS server и приватные 256-KiB shared file windows;
-- shell: `ls`, `cd`, `mkdir`, `touch`, `cat`, `write`, `pwd`, `clear`, `help`;
+- offset/append streaming write с COW-публикацией и CRC32C по страницам;
+- загрузка ELF64 прямо из VaraniaFS через shared capability и `procd`;
+- официальный FASM 1.73.35 с Varania platform layer: VFS, terminal, heap, exit;
+- shell: `ls`, `cd`, `mkdir`, `touch`, `cat`, `write`, `append`, `run`,
+  `pwd`, `clear`, `help`;
 - host-утилита VaraniaFS для macOS/Linux: format/import/get/put/rm/fsck;
 - тесты изоляции памяти, lifecycle, IPC, revoke, supervisor, shared memory,
   NVMe DMA и сохранности файлов после остановки VM.
@@ -39,6 +43,7 @@ flowchart LR
     FS -->|"block RPC"| NV["nvme.elf"]
     NV -->|"DMA"| SSD["NVMe volume"]
     FS -->|"private shared window"| SH
+    SH -->|"ELF shared capability"| P["procd.elf"]
     P["procd.elf"] -->|"space/frame/thread"| K["microkernel"]
 ```
 
@@ -82,10 +87,23 @@ system/
 varania:/$ mkdir demo
 varania:/$ cd demo
 varania:/demo$ touch note
-varania:/demo$ write note hello
+varania:/demo$ write note hel
+varania:/demo$ append note lo
 varania:/demo$ cat note
 hello
 ```
+
+FASM — обычная системная программа на томе, а не особый код ядра:
+
+```text
+varania:/$ cd bin
+varania:/bin$ run fasm.elf /system/t.asm /system/build/t.elf
+flat assembler  version 1.73.35  (16384 kilobytes memory, x64)
+varania:/bin$ cd /system/build
+varania:/system/build$ run t.elf
+```
+
+Последняя команда запускает ELF, только что созданный внутри Varania OS.
 
 В формате намеренно нет UID/GID/mode/ACL и аналога `sudo`. Доступ задаётся
 endpoint capability процесса, а не POSIX-моделью прав.
@@ -112,7 +130,7 @@ python3 tools/vafs/vafs.py fsck VARANIA.VAFS --data
 
 | Команда | Что проверяет или запускает |
 |---|---|
-| `make build` | kernel, 19 ELF64, initramfs и оба sparse-диска |
+| `make build` | kernel, 19 bootstrap ELF, disk ELF/FASM и оба sparse-диска |
 | `make check` | boot layout, ELF W^X, FASM hash и VaraniaFS fsck |
 | `make smoke` | boot, процессы, IPC, IRQ1 и NVMe DMA read/write/flush |
 | `make test-shell` | keyboard → terminal → VFS → NVMe и remount/fsck |
@@ -135,6 +153,8 @@ src/user/vafs.asm               persistent COW filesystem server
 src/user/terminal.asm           VGA terminal и line discipline
 src/user/keyboard.asm           PS/2 compatibility input driver
 src/user/shell.asm              файловая командная оболочка
+src/fasm/                       platform layer официального FASM 1.73.35
+src/programs/                   программы, живущие только на VaraniaFS
 tools/vafs/vafs.py              macOS/Linux VaraniaFS CLI
 tests/                          structural, recovery и QEMU end-to-end tests
 ```
@@ -147,6 +167,7 @@ tests/                          structural, recovery и QEMU end-to-end tests
 - [VFS/block IPC и shell](docs/FILESYSTEM.md)
 - [ABI системных вызовов](docs/SYSCALLS.md)
 - [User-space ELF loader](docs/USERSPACE.md)
+- [FASM и граница self-hosting](docs/FASM.md)
 - [Сборка и тесты](docs/DEVELOPMENT.md)
 - [Драйверы в ring 3](docs/DRIVERS.md)
 
@@ -156,9 +177,11 @@ tests/                          structural, recovery и QEMU end-to-end tests
 - scheduler однопроцессорный PIC/PIT; ACPI, APIC, SMP-locking ещё впереди;
 - terminal использует VGA text mode, keyboard — PS/2 set 1; GOP/USB HID не готовы;
 - VaraniaFS v1 использует append allocator без segment cleaner/discard;
-- runtime loader пока берёт bootstrap ELF из initramfs, а не по пути VaraniaFS;
-- FASM 1.73.35 source уже лежит на системном томе, но Varania platform layer и
-  полностью self-hosted сборка ещё не завершены;
+- только `procd`/`init` и bootstrap-сервисы берутся из initramfs; обычные ELF
+  уже читаются непосредственно из VaraniaFS;
+- FASM 1.73.35 уже собирает и запускает программы внутри системы, но оркестратор
+  полной пересборки boot/kernel/initramfs и атомарной установки нового образа
+  ещё предстоит перенести с host Makefile;
 - только статические ELF64 `ET_EXEC`, без PIE/dynamic linker;
 - один user thread на процесс, максимум 16 активных TCB.
 

@@ -35,6 +35,7 @@ SYS_IO_READ32       = 29
 SYS_IO_WRITE32      = 30
 SYS_MMIO_CREATE     = 31
 SYS_DMA_CREATE      = 32
+SYS_SHARED_UNMAP    = 33
 
 CAP_SEND  = 1
 CAP_READ  = 2
@@ -76,7 +77,9 @@ ThreadConfig.bytes       = ThreadConfig.grants+4*SpawnGrant.bytes
 USER_STACK_TOP   = 0x00007FFFFFF00000
 USER_STACK_LIMIT = USER_STACK_TOP-16*PAGE_SIZE
 
-PROCD_SPAWN = 1
+PROCD_SPAWN       = 1            ;// ELF из bootstrap initramfs по имени
+PROCD_SPAWN_IMAGE = 2            ;// ELF в переданном shared-memory объекте
+PROCD_CONFIGURE   = 3            ;// одноразовый bootstrap: endpoint nameserver
 NAMESERVER_REGISTER = 1
 NAMESERVER_LOOKUP   = 2
 
@@ -85,6 +88,7 @@ SERVICE_TERMINAL = 2
 SERVICE_RAMFS    = 3
 SERVICE_FILESYSTEM = 3           ;// совместимый ID постоянного VFS-сервиса
 SERVICE_BLOCK    = 4
+SERVICE_PROCESS  = 5
 
 BLOCK_ATTACH = 1
 BLOCK_READ   = 2
@@ -104,6 +108,10 @@ FS_ATTACH = 5
 FS_READ   = 6
 FS_WRITE  = 7
 FS_STAT   = 8
+FS_DETACH = 9
+;// Обычная WRITE сохраняет байты вне записываемого диапазона. TRUNCATE
+;// начинает новое содержимое и публикует его одной COW-транзакцией.
+FS_WRITE_TRUNCATE = 1
 FS_NODE_FILE = 1
 FS_NODE_DIR  = 2
 

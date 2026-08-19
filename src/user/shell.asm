@@ -29,6 +29,12 @@ start:
   test rax, rax
   jnz fatal
 
+  mov edi, SERVICE_PROCESS
+  call lookup_service
+  test rax, rax
+  js fatal
+  mov [process_endpoint], rax
+
   log ready_text, ready_text.size
   lea rdi, [shell_ready]
   call print_z
@@ -92,6 +98,16 @@ start:
   call starts_with
   test eax, eax
   jnz .write
+  lea rdi, [line_buffer]
+  lea rsi, [prefix_append]
+  call starts_with
+  test eax, eax
+  jnz .append
+  lea rdi, [line_buffer]
+  lea rsi, [prefix_run]
+  call starts_with
+  test eax, eax
+  jnz .run
 
   lea rdi, [unknown_text]
   call print_z
@@ -133,7 +149,17 @@ start:
   jmp .prompt
 .write:
   lea rsi, [line_buffer+6]
+  mov edi, FS_WRITE_TRUNCATE
   call command_write
+  jmp .prompt
+.append:
+  lea rsi, [line_buffer+7]
+  xor edi, edi
+  call command_write
+  jmp .prompt
+.run:
+  lea rsi, [line_buffer+4]
+  call command_run
   jmp .prompt
 
 fatal:
@@ -422,11 +448,14 @@ command_cat:
   pop rbx
   ret
 
-;// RSI="NAME TEXT". Учебная команда намеренно заменяет файл атомарно целиком.
+;// EDI=FS_WRITE flags, RSI="NAME TEXT". write начинает файл заново, append
+;// сначала запрашивает текущий размер и пишет с этого offset.
 command_write:
   push rbx
   push r12
   push r13
+  push r15
+  mov r15, rdi
   mov r12, rsi
   mov r13, rsi
 .separator:
@@ -448,6 +477,17 @@ command_write:
   cmp qword [ipc_reply+IpcMessage.words+16], FS_NODE_FILE
   jne .error
   mov rbx, qword [ipc_reply+IpcMessage.words+8]
+  xor r12d, r12d
+  test r15, FS_WRITE_TRUNCATE
+  jnz .measure
+  call prepare_fs_request
+  mov qword [ipc_message+IpcMessage.words], FS_STAT
+  mov qword [ipc_message+IpcMessage.words+8], rbx
+  call fs_rpc
+  test rax, rax
+  jnz .error
+  mov r12, qword [ipc_reply+IpcMessage.words+8]
+.measure:
   xor ecx, ecx
 .length:
   cmp byte [r13+rcx], 0
@@ -465,9 +505,10 @@ command_write:
   call prepare_fs_request
   mov qword [ipc_message+IpcMessage.words], FS_WRITE
   mov qword [ipc_message+IpcMessage.words+8], rbx
-  mov qword [ipc_message+IpcMessage.words+16], 0
+  mov qword [ipc_message+IpcMessage.words+16], r12
   mov qword [ipc_message+IpcMessage.words+24], rdx
   mov qword [ipc_message+IpcMessage.words+32], 0
+  mov qword [ipc_message+IpcMessage.words+40], r15
   call fs_rpc
   test rax, rax
   jnz .error
@@ -479,6 +520,134 @@ command_write:
   lea rdi, [fs_error_text]
   call print_z
 .done:
+  pop r15
+  pop r13
+  pop r12
+  pop rbx
+  ret
+
+;// Запустить ELF64 непосредственно из текущего каталога VaraniaFS.
+;// Файл целиком читается в 256-KiB окно только один раз; procd получает shared
+;// capability, а не копию байтов. RDX в ответе — обычный exit status процесса.
+command_run:
+  push rbx
+  push r12
+  push r13
+  push r14
+  push r15
+  mov r15, rsi                    ;// полная строка: executable [arguments]
+  mov r13, rsi
+  xor r14d, r14d
+.find_argument:
+  mov al, [r13]
+  test al, al
+  jz .lookup
+  cmp al, ' '
+  je .split_command
+  inc r13
+  jmp .find_argument
+.split_command:
+  mov byte [r13], 0
+  mov r14d, 1
+.lookup:
+  mov edi, FS_LOOKUP
+  mov rsi, r15
+  call fs_named_request
+  test r14d, r14d
+  jz .lookup_done
+  mov byte [r13], ' '
+.lookup_done:
+  test rax, rax
+  jnz .error
+  cmp qword [ipc_reply+IpcMessage.words+16], FS_NODE_FILE
+  jne .error
+  mov rbx, qword [ipc_reply+IpcMessage.words+8]
+
+  call prepare_fs_request
+  mov qword [ipc_message+IpcMessage.words], FS_STAT
+  mov qword [ipc_message+IpcMessage.words+8], rbx
+  call fs_rpc
+  test rax, rax
+  jnz .error
+  mov r12, qword [ipc_reply+IpcMessage.words+8]
+  test r12, r12
+  jz .error
+  cmp r12, [filesystem_buffer_size]
+  ja .too_large
+
+  call prepare_fs_request
+  mov qword [ipc_message+IpcMessage.words], FS_READ
+  mov qword [ipc_message+IpcMessage.words+8], rbx
+  mov qword [ipc_message+IpcMessage.words+16], 0
+  mov qword [ipc_message+IpcMessage.words+24], r12
+  mov qword [ipc_message+IpcMessage.words+32], 0
+  call fs_rpc
+  test rax, rax
+  jnz .error
+  cmp qword [ipc_reply+IpcMessage.words+8], r12
+  jne .error
+
+  lea rdi, [ipc_message]
+  mov ecx, IpcMessage.bytes
+  xor eax, eax
+  rep stosb
+  mov qword [ipc_message+IpcMessage.words], PROCD_SPAWN_IMAGE
+  mov qword [ipc_message+IpcMessage.words+8], r12
+  lea rdi, [ipc_message+IpcMessage.words+16]
+  mov rsi, r15
+  mov ecx, 48
+.copy_command:
+  lodsb
+  stosb
+  test al, al
+  jz .command_ready
+  dec ecx
+  jnz .copy_command
+  jmp .error
+.command_ready:
+  mov qword [ipc_message+IpcMessage.cap_count], 2
+  mov qword [ipc_message+IpcMessage.caps+IpcCap.handle], SELF_EP
+  mov qword [ipc_message+IpcMessage.caps+IpcCap.rights], CAP_SEND
+  mov rax, [filesystem_buffer_cap]
+  mov qword [ipc_message+IpcMessage.caps+IpcCap.bytes+IpcCap.handle], rax
+  mov qword [ipc_message+IpcMessage.caps+IpcCap.bytes+IpcCap.rights], CAP_MAP+CAP_READ
+  mov rdi, [process_endpoint]
+  lea rsi, [ipc_message]
+  call send_retry
+  test rax, rax
+  jnz .error
+  ipc_receive SELF_EP, ipc_reply
+  test rax, rax
+  jnz .error
+  cmp qword [ipc_reply+IpcMessage.words], 0
+  jne .error
+  cmp qword [ipc_reply+IpcMessage.cap_count], 2
+  jne .error
+  mov r12, qword [ipc_reply+IpcMessage.caps+IpcCap.handle]
+  mov r13, qword [ipc_reply+IpcMessage.caps+IpcCap.bytes+IpcCap.handle]
+  mov rdi, r12
+  system_call SYS_WAIT
+  mov rbx, rax
+  mov rdi, r12
+  call close_handle
+  mov rdi, r13
+  call close_handle
+  test rbx, rbx
+  jnz .error
+  lea rdi, [run_ok]
+  call print_z
+  log run_ok_text, run_ok_text.size
+  jmp .done
+.too_large:
+  lea rdi, [elf_large_text]
+  call print_z
+  jmp .done
+.error:
+  lea rdi, [run_error_text]
+  call print_z
+.done:
+  pop r15
+  pop r14
   pop r13
   pop r12
   pop rbx
@@ -605,6 +774,14 @@ fs_rpc:
   test rax, rax
   jnz .done
   mov rax, qword [ipc_reply+IpcMessage.words]
+.done:
+  ret
+
+close_handle:
+  test rdi, rdi
+  jz .done
+  mov eax, SYS_CAP_CLOSE
+  syscall
 .done:
   ret
 
@@ -752,13 +929,15 @@ cat_ok_text db "VARANIA:SHELL_CAT_OK", 10
 .size = $-cat_ok_text
 write_ok_text db "VARANIA:SHELL_WRITE_OK", 10
 .size = $-write_ok_text
+run_ok_text db "VARANIA:SHELL_RUN_OK", 10
+.size = $-run_ok_text
 failed_text db "shell: fatal service or IPC error", 10
 .size = $-failed_text
 
 shell_ready db "Shell is ready. Type 'help' for commands.", 10, 10, 0
 prompt_prefix db "varania:", 0
 prompt_suffix db "$ ", 0
-help_text db "Commands: ls, cd, mkdir, touch, cat, write, pwd, clear, help", 10, 0
+help_text db "Commands: ls, cd, mkdir, touch, cat, write, append, run, pwd, clear, help", 10, 0
 unknown_text db "Unknown command. Type 'help'.", 10, 0
 fs_error_text db "Filesystem operation failed.", 10, 0
 not_dir_text db "cd: target is not a directory.", 10, 0
@@ -766,6 +945,9 @@ path_long_text db "cd: displayed path is too long.", 10, 0
 mkdir_ok db "Directory created.", 10, 0
 touch_ok db "File created.", 10, 0
 write_ok db "File written atomically.", 10, 0
+run_ok db "Program exited successfully.", 10, 0
+run_error_text db "run: cannot load ELF64 program.", 10, 0
+elf_large_text db "run: ELF is larger than the 256 KiB loader window.", 10, 0
 slash db "/", 0
 newline db 10, 0
 
@@ -778,10 +960,13 @@ prefix_mkdir db "mkdir ", 0
 prefix_touch db "touch ", 0
 prefix_cat db "cat ", 0
 prefix_write db "write ", 0
+prefix_append db "append ", 0
+prefix_run db "run ", 0
 
 align 8
 terminal_endpoint dq 0
 filesystem_endpoint dq 0
+process_endpoint dq 0
 filesystem_buffer_cap dq 0
 filesystem_buffer_size dq 0
 current_node dq 0

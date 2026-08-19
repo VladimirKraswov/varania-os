@@ -26,6 +26,7 @@ NVMe buffer и не может посылать block-команды.
 | 2 | `terminal.elf` | текстовый вывод и строки ввода |
 | 3 | `vafs.elf` | файловый протокол |
 | 4 | `nvme.elf` | 4-KiB block protocol |
+| 5 | `procd.elf` | загрузка ELF64 из shared file window |
 
 `procd` выдаёт NVMe-процессу только BAR, DMA allocator и nameserver. VFS
 получает nameserver и `CREATE`-право, чтобы создавать отдельные shared windows;
@@ -85,21 +86,35 @@ request:  object, file offset, byte count, window offset
 success:  status=0, bytes read
 
 FS_WRITE=7
-request:  object, file offset, byte count, window offset
+request:  object, file offset, byte count, window offset, flags
 success:  status=0, bytes written
 
 FS_STAT=8
 request:  object
 success:  status=0, file size, type, object ID
+
+FS_DETACH=9
+request:  reply cap
+success:  status=0, per-client window освобождён
 ```
 
-Текущий `FS_WRITE` атомарно заменяет содержимое целого файла и поэтому требует
-offset `0`; размер одного вызова ограничен приватным окном 256 KiB. Это честная
-граница v1. Streaming/append API будет добавлен перед FASM platform layer.
+Обычный `FS_WRITE` сохраняет байты до и после диапазона. Флаг
+`FS_WRITE_TRUNCATE=1` начинает новое содержимое; `write` использует его на
+первом chunk, а `append` пишет с offset текущего `FS_STAT.size`. Один RPC
+переносит до 256 KiB, но размер файла этим не ограничен.
+
+VaraniaFS v1 реализует partial write максимально наглядно: читает старые
+страницы, накладывает новый диапазон, считает CRC32C потоком и записывает новую
+непрерывную COW-версию. Поэтому каждый вызов атомарен, но серия маленьких append
+пока имеет O(n²) write amplification. Следующая on-disk оптимизация — extent
+log/segment cleaner; IPC ABI останется тем же.
 
 VFS создаёт до четырёх окон по 64 страницы и привязывает их к неподлежающему
 подделке `IpcMessage.sender`. Клиенты не делят DMA buffer NVMe и не могут
 подменить данные другого клиента во время RPC.
+Короткоживущие клиенты посылают `FS_DETACH`: VFS удаляет своё mapping, закрывает
+handle и возвращает slot. При аварийном завершении эту уборку позже заменит
+общий process-death notification от supervisor.
 
 ## COW commit
 
@@ -128,6 +143,8 @@ new data extents
 | `touch` | `FS_CREATE` |
 | `cat` | `FS_LOOKUP` + последовательные `FS_READ` |
 | `write FILE TEXT` | `FS_LOOKUP` + `FS_WRITE` |
+| `append FILE TEXT` | `FS_STAT` + offset `FS_WRITE` |
+| `run FILE [ARGS]` | `FS_READ` + shared cap → process service |
 | `pwd`, `clear`, `help` | локально/terminal IPC |
 
 Line discipline принимает до 47 ASCII-байт. UTF-8 уже допустим на диске и в
@@ -137,8 +154,9 @@ service.
 ## Проверка
 
 `tests/test_shell.py` вводит настоящие key events через QMP, читает VGA memory,
-делает `cat` существующего системного файла, создаёт `/demo/note`, записывает
-`hello`, читает его обратно и останавливает VM. После остановки host CLI обязан:
+делает `cat` существующего системного файла, запускает disk-only ELF, собирает
+новый ELF системным FASM, выполняет его, затем создаёт `/demo/note` двумя
+streaming writes (`hel` + `lo`) и останавливает VM. После остановки host CLI обязан:
 
 - пройти `fsck --data`;
 - увидеть `/demo/note` в новом поколении;

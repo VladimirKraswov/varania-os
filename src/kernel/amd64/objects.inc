@@ -44,11 +44,14 @@ AddressSpace.bytes = 32
 SHARED_MAX_PAGES = 64
 SharedMemory.page_count = 16
 SharedMemory.frames     = 24       ;// SHARED_MAX_PAGES qword
-SharedMemory.bytes      = 152
+;// Object header (16) + page_count (8) + 64 физических адреса. Размер должен
+;// меняться вместе с SHARED_MAX_PAGES: иначе frames выходят за kernel object.
+SharedMemory.bytes      = SharedMemory.frames+SHARED_MAX_PAGES*8
 
 SharedMapping.next = 0
 SharedMapping.shm  = 8
-SharedMapping.bytes = 16
+SharedMapping.base = 16
+SharedMapping.bytes = 24
 
 ENDPOINT_QUEUE_SIZE = 8
 ;// Восемь qword дают 56 байт payload после кода операции.
@@ -175,7 +178,7 @@ function address_space_create
   pop rbx
 endf
 
-;// Создать shared-memory object из 1..16 обнулённых frames. RDI=page count.
+;// Создать shared-memory object из 1..64 обнулённых frames. RDI=page count.
 function shared_memory_create
   push rbx
   push r12

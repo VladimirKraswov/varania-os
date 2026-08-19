@@ -7,7 +7,7 @@
 создать suspended thread. Поэтому обычный путь выглядит так:
 
 ```text
-init --spawn RPC--> procd --BOOTFS--> initramfs entry
+init/shell --spawn RPC--> procd --BOOTFS/shared VFS window--> ELF image
                          |
                          +--> validate ELF64
                          +--> SPACE_CREATE
@@ -113,6 +113,24 @@ Success reply содержит `words[0]=0`, process capability с `WAIT|CONTROL
 нового процесса с `SEND`. Обе передаются с `CAP_MOVE`, поэтому procd не копит
 handles. Ошибка возвращается в `words[0]` без capabilities.
 
+После создания nameserver init передаёт его endpoint операцией
+`PROCD_CONFIGURE=3` и регистрирует control endpoint как `SERVICE_PROCESS=5`.
+Обычный disk spawn выглядит так:
+
+```text
+words[0] = PROCD_SPAWN_IMAGE
+words[1] = точный размер ELF
+words[2..7] = "executable [arguments]", NUL, максимум 47 байт
+cap[0] = reply endpoint
+cap[1] = shared image с MAP|READ
+```
+
+Procd отображает все 64 страницы окна read-only, применяет тот же строгий ELF
+validator, создаёт процесс и вызывает `SHARED_UNMAP`. Командная строка
+превращается в минимальный System V `argc/argv` stack (до восьми аргументов,
+пока без quoting). Disk process получает собственный endpoint как handle 1 и
+nameserver как handle 2.
+
 Особые grants задаёт bootstrap policy procd, а не запрашивающий процесс:
 keyboard получает nameserver/IRQ/I/O, terminal — nameserver/VGA MMIO,
 NVMe — BAR/DMA, VFS — nameserver/`CREATE`, а `shm_sender` — `CREATE`.
@@ -165,6 +183,10 @@ message db "hello from ring 3", 10
 4. передать только минимальные capabilities;
 5. добавить наблюдаемый тестовый marker;
 6. выполнить `make clean && make test`.
+
+Обычную, не bootstrap-программу следует помещать в `src/programs`, собирать в
+`build/disk` и импортировать в `/bin`: тогда тест действительно доказывает
+загрузку с VaraniaFS, а не случайное присутствие ELF в initramfs.
 
 ## Встроенные проверки
 

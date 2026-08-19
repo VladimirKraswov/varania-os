@@ -13,6 +13,10 @@ KERNEL = ROOT / "KERNEL.BIN"
 INITRAMFS = ROOT / "INITRAMFS.BIN"
 DISK = ROOT / "VOS.VHD"
 FASM_ARCHIVE = ROOT / "tools" / "fasm" / "fasm-1.73.35.tgz"
+DISK_ELFS = {
+    "hello.elf": ROOT / "build" / "disk" / "hello.elf",
+    "fasm.elf": ROOT / "build" / "disk" / "fasm.elf",
+}
 FASM_SHA256 = "a34dec7d0bc2dc79faabb68bd8bc2f62b6cfb31d69c01449367ce4cd8098934e"
 INITRAMFS_SIZE = 192 * 1024
 DISK_SIZE = 1 * 1024 * 1024 * 1024
@@ -154,6 +158,11 @@ def main() -> None:
     if len(kernel) != 65536:
         fail(f"KERNEL.BIN: ожидалось 65536 байт, получено {len(kernel)}")
     check_initramfs(initramfs)
+    for name, path in DISK_ELFS.items():
+        image = path.read_bytes()
+        check_elf(name, image)
+        if len(image) > 256 * 1024:
+            fail(f"{name}: ELF не помещается в текущее shared loader window")
     prefix = boot + kernel + initramfs
     with DISK.open("rb") as disk_file:
         if disk_file.read(len(prefix)) != prefix:
@@ -175,8 +184,8 @@ def main() -> None:
     print(f"  initramfs: {len(initramfs)} байт, {len(EXPECTED_PROGRAMS)} ELF64")
     print(f"  диск:      {disk_size} байт ({disk_size // 512} секторов, sparse)")
     print("  VaraniaFS: offset 4 MiB, format v1")
-    print("  ELF:       ET_EXEC/x86-64, PT_LOAD, W^X и границы подтверждены")
-    print("  FASM:      SHA-256 подтверждён")
+    print("  ELF:       bootstrap и disk ET_EXEC/x86-64, PT_LOAD, W^X подтверждены")
+    print("  FASM:      archive SHA-256 и guest platform ELF подтверждены")
 
 
 if __name__ == "__main__":

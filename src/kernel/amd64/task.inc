@@ -395,9 +395,14 @@ function task_spawn_image
 
   mov [r15+Task.parent], r14
   mov qword [r15+Task.wait_irq], -1
-  call vmm_create_space
+  ;// Даже самый первый user process использует тот же AddressSpace object,
+  ;// что и созданные через low-level API процессы. Иначе bootstrap procd имел
+  ;// только raw CR3 и не мог безопасно создавать/удалять shared mappings.
+  call address_space_create
   test rax, rax
   jz .discard
+  mov [r15+Task.space], rax
+  mov rax, [rax+AddressSpace.cr3]
   mov [r15+Task.cr3], rax
 
   call pmm_alloc_frame

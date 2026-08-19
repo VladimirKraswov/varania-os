@@ -34,6 +34,7 @@ SYS_IO_READ32       = 29
 SYS_IO_WRITE32      = 30
 SYS_MMIO_CREATE     = 31
 SYS_DMA_CREATE      = 32
+SYS_SHARED_UNMAP    = 33
 
 ERR_NOENT = -2
 ERR_BAD_HANDLE = -9
@@ -530,6 +531,7 @@ function syscall_shared_map
   mov rcx, [rbx+AddressSpace.shared_head]
   mov [rax+SharedMapping.next], rcx
   mov [rax+SharedMapping.shm], r12
+  mov [rax+SharedMapping.base], r13
   mov [rbx+AddressSpace.shared_head], rax
   mov edi, CAP_SHARED
   mov rsi, r12
@@ -563,6 +565,76 @@ function syscall_shared_map
   mov rax, ERR_INVALID
   .done:
   add rsp, 8
+  pop r15
+  pop r14
+  pop r13
+  pop r12
+  pop rbx
+endf
+
+;// Удалить ранее созданное shared mapping по его начальному адресу.
+;// Capability на объект закрывать не обязательно: mapping держит отдельную
+;// ссылку, а unmap освобождает именно её. Это позволяет долгоживущему procd
+;// переиспользовать одно окно для последовательной загрузки ELF.
+;// RDI=virtual base. RAX=0/error.
+function syscall_shared_unmap
+  push rbx
+  push r12
+  push r13
+  push r14
+  push r15
+  mov r12, rdi
+  test r12, PAGE_SIZE-1
+  jnz .invalid
+  cmp r12, USER.imageMin
+  jb .invalid
+
+  mov edi, [current_task]
+  call task_by_index
+  mov rbx, [rax+Task.space]
+  test rbx, rbx
+  jz .invalid
+  lea r13, [rbx+AddressSpace.shared_head] ;// адрес ссылки на текущую запись
+.find:
+  mov r14, [r13]
+  test r14, r14
+  jz .missing
+  cmp [r14+SharedMapping.base], r12
+  je .found
+  lea r13, [r14+SharedMapping.next]
+  jmp .find
+
+.found:
+  mov r15, [r14+SharedMapping.shm]
+  xor ecx, ecx
+.page:
+  cmp rcx, [r15+SharedMemory.page_count]
+  jae .unlink
+  mov rsi, rcx
+  shl rsi, 12
+  add rsi, r12
+  mov rdi, [rbx+AddressSpace.cr3]
+  push rcx
+  call vmm_unmap_in_space
+  pop rcx
+  inc rcx
+  jmp .page
+.unlink:
+  mov rax, [r14+SharedMapping.next]
+  mov [r13], rax
+  mov edi, CAP_SHARED
+  mov rsi, r15
+  call object_release
+  mov rdi, r14
+  call kfree
+  xor eax, eax
+  jmp .done
+.missing:
+  mov rax, ERR_NOENT
+  jmp .done
+.invalid:
+  mov rax, ERR_INVALID
+.done:
   pop r15
   pop r14
   pop r13
@@ -1059,6 +1131,8 @@ function syscall_dispatch
   je .mmio_create
   cmp rax, SYS_DMA_CREATE
   je .dma_create
+  cmp rax, SYS_SHARED_UNMAP
+  je .shared_unmap
   mov qword [r12+Context.rax], ERR_NOSYS
   jmp .resume_current
 
@@ -1186,6 +1260,12 @@ function syscall_dispatch
   mov rsi, [r12+Context.rsi]
   mov rdx, [r12+Context.rdx]
   call syscall_shared_map
+  mov [r12+Context.rax], rax
+  jmp .resume_current
+
+  .shared_unmap:
+  mov rdi, [r12+Context.rdi]
+  call syscall_shared_unmap
   mov [r12+Context.rax], rax
   jmp .resume_current
 

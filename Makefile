@@ -21,6 +21,12 @@ USER_PROGRAMS := procd init nameserver service client terminal keyboard nvme vaf
 		 lifecycle_child cap_revoke_test supervisor kill_target restart_worker \
 		 shm_receiver shm_sender
 USER_ELFS := $(addprefix $(USER_BUILD)/,$(addsuffix .elf,$(USER_PROGRAMS)))
+DISK_BUILD := build/disk
+DISK_PROGRAMS := hello
+DISK_ELFS := $(addprefix $(DISK_BUILD)/,$(addsuffix .elf,$(DISK_PROGRAMS)))
+FASM_SOURCE_STAMP := build/fasm-source/.stamp
+FASM_GUEST_ELF := $(DISK_BUILD)/fasm.elf
+DISK_ELFS += $(FASM_GUEST_ELF)
 
 BOOT_SOURCES := src/boot/boot.asm src/boot/disk.inc \
                 src/kernel/memory/meminfo.inc src/const.inc
@@ -46,6 +52,20 @@ $(USER_BUILD)/%.elf: src/user/%.asm src/user/abi.inc tools/fasm/run.sh
 	mkdir -p $(USER_BUILD)
 	$(FASM_RUNNER) $< $@
 
+$(DISK_BUILD)/%.elf: src/programs/%.asm src/user/abi.inc tools/fasm/run.sh
+	mkdir -p $(DISK_BUILD)
+	$(FASM_RUNNER) $< $@
+
+$(FASM_SOURCE_STAMP): tools/fasm/fasm-1.73.35.tgz
+	rm -rf build/fasm-source
+	mkdir -p build/fasm-source
+	tar -xzf $< -C build/fasm-source --strip-components=1
+	touch $@
+
+$(FASM_GUEST_ELF): src/fasm/fasm.asm src/fasm/platform.inc $(FASM_SOURCE_STAMP) tools/fasm/run.sh
+	mkdir -p $(DISK_BUILD)
+	$(FASM_RUNNER) src/fasm/fasm.asm $@
+
 $(INITRAMFS_IMAGE): $(USER_ELFS) scripts/mkinitramfs.py
 	python3 scripts/mkinitramfs.py --size 196608 $@ \
 	  $(foreach program,$(USER_PROGRAMS),$(program).elf=$(USER_BUILD)/$(program).elf)
@@ -54,17 +74,20 @@ $(BOOT_PREFIX): $(BOOT_IMAGE) $(KERNEL_IMAGE) $(INITRAMFS_IMAGE) src/link.asm
 	mkdir -p $(dir $@)
 	$(FASM_RUNNER) src/link.asm $@
 
-# Host здесь только готовит первый seed-диск. Обычная пересборка после
-# порта FASM выполняется внутри Varania OS. Sparse truncate не занимает
-# 1 GiB на APFS/ext4, пока гость не запишет данные.
-$(DISK_IMAGE): $(BOOT_PREFIX) $(SYSROOT_INPUTS) $(USER_ELFS)
+# Host готовит воспроизводимый seed-диск. Guest FASM уже собирает программы
+# внутри Varania OS; перенос компоновки kernel/initramfs будет следующим слоем.
+# Sparse image не занимает 1 GiB на APFS/ext4, пока гость не запишет блоки.
+$(DISK_IMAGE): $(BOOT_PREFIX) $(SYSROOT_INPUTS) $(USER_ELFS) $(DISK_ELFS)
 	rm -rf build/sysroot
-	mkdir -p build/sysroot/root/system/build build/sysroot/root/system/tools/fasm
+	mkdir -p build/sysroot/root/bin build/sysroot/root/system/build/fasm-source build/sysroot/root/system/tools/fasm
 	tar -xzf tools/fasm/fasm-1.73.35.tgz -C build/sysroot
 	cp -R src build/sysroot/root/system/src
 	cp -R docs build/sysroot/root/system/docs
 	cp -R scripts build/sysroot/root/system/scripts
 	cp -R build/user build/sysroot/root/system/build/user
+	cp $(DISK_ELFS) build/sysroot/root/bin/
+	cp src/programs/selfhost_test.asm build/sysroot/root/system/t.asm
+	cp -R build/fasm-source/source build/sysroot/root/system/build/fasm-source/source
 	cp -R build/sysroot/fasm/source build/sysroot/root/system/tools/fasm/source
 	cp Makefile README.md BOOT.BIN KERNEL.BIN INITRAMFS.BIN build/sysroot/root/system/
 	cp build/sysroot/fasm/fasm.txt build/sysroot/root/system/tools/fasm/FASM.TXT

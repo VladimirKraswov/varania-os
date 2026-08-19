@@ -14,6 +14,8 @@ IO_CAP      = 5
 VGA_CAP     = 6
 PCI_IO_CAP  = 7
 DMA_POOL_CAP = 8
+DISK_IMAGE_VA = 0x0000000066000000
+DISK_IMAGE_MAX = 64*PAGE_SIZE
 
 ELF_HEADER_SIZE = 64
 ELF_PH_SIZE     = 56
@@ -69,7 +71,13 @@ start:
   ipc_receive CONTROL_EP, ipc_request
   test rax, rax
   jnz fatal
-  cmp qword [ipc_request+IpcMessage.words], PROCD_SPAWN
+  mov qword [load_command], 0
+  mov rax, qword [ipc_request+IpcMessage.words]
+  cmp rax, PROCD_CONFIGURE
+  je .configure
+  cmp rax, PROCD_SPAWN_IMAGE
+  je .spawn_image
+  cmp rax, PROCD_SPAWN
   jne .bad_request
 
   ;// Имя занимает три оставшихся слова и обязательно содержит NUL.
@@ -217,6 +225,7 @@ start:
   mov rdi, r14
   mov rsi, r15
   call load_program
+  .loaded:
   mov qword [response+IpcMessage.words], rax
   test rax, rax
   js .reply_without_caps
@@ -229,6 +238,94 @@ start:
   mov rax, CAP_SEND+CAP_MOVE
   mov qword [response+IpcMessage.caps+IpcCap.bytes+IpcCap.rights], rax
   jmp .reply
+
+  ;// Дисковый ELF приходит не копией в IPC, а read-only shared object.
+  ;// load_program использует тот же строгий валидатор, что и initramfs.
+  .spawn_image:
+  cmp qword [ipc_request+IpcMessage.cap_count], 2
+  jne .bad_request
+  mov r13, qword [ipc_request+IpcMessage.caps+IpcCap.handle]
+  mov r15, qword [ipc_request+IpcMessage.words+8]
+  test r15, r15
+  jz .bad_request
+  cmp r15, DISK_IMAGE_MAX
+  ja .bad_request
+  mov r14, qword [ipc_request+IpcMessage.caps+IpcCap.bytes+IpcCap.handle]
+  lea rdi, [ipc_request+IpcMessage.words+16]
+  call bounded_command_length
+  test rax, rax
+  jz .bad_request
+  lea rax, [ipc_request+IpcMessage.words+16]
+  mov [load_command], rax
+  mov eax, SYS_SHARED_MAP
+  mov rdi, r14
+  mov rsi, DISK_IMAGE_VA
+  xor edx, edx
+  syscall
+  test rax, rax
+  js .image_error
+  mov rdi, DISK_IMAGE_VA
+  mov rsi, r15
+  mov rdx, [nameserver_cap]
+  mov ecx, CAP_SEND
+  xor r8d, r8d
+  xor r9d, r9d
+  mov qword [policy_extra3], 0
+  mov qword [policy_extra3_rights], 0
+  call load_program
+  mov r14, rax
+  mov r15, rdx
+  test r14, r14
+  jns .image_loaded
+  log image_load_error_text, image_load_error_text.size
+.image_loaded:
+  mov eax, SYS_SHARED_UNMAP
+  mov rdi, DISK_IMAGE_VA
+  syscall
+  mov rax, r14
+  mov rdx, r15
+  jmp .loaded
+  .image_error:
+  push rax
+  cmp rax, -9
+  je .log_bad_handle
+  cmp rax, -16
+  je .log_busy
+  cmp rax, -22
+  je .log_invalid
+  log image_map_error_text, image_map_error_text.size
+  jmp .logged_map_error
+.log_bad_handle:
+  log image_bad_handle_text, image_bad_handle_text.size
+  jmp .logged_map_error
+.log_busy:
+  log image_busy_text, image_busy_text.size
+  jmp .logged_map_error
+.log_invalid:
+  log image_invalid_text, image_invalid_text.size
+.logged_map_error:
+  pop rax
+  mov qword [response+IpcMessage.words], rax
+  jmp .reply_without_caps
+
+  ;// Только init выполняет этот вызов до запуска клиентов. Полученная
+  ;// capability остаётся у procd и ослабленно наследуется disk applications.
+  .configure:
+  cmp qword [nameserver_cap], 0
+  jne .discard_config             ;// bootstrap-настройка строго одноразовая
+  cmp qword [ipc_request+IpcMessage.cap_count], 1
+  jne .discard_config
+  mov rdi, [nameserver_cap]
+  call close_handle
+  mov rax, qword [ipc_request+IpcMessage.caps+IpcCap.handle]
+  mov [nameserver_cap], rax
+  jmp .clear_messages
+  .discard_config:
+  cmp qword [ipc_request+IpcMessage.cap_count], 1
+  jb .clear_messages
+  mov rdi, qword [ipc_request+IpcMessage.caps+IpcCap.handle]
+  call close_handle
+  jmp .clear_messages
 
   .not_found:
   mov r13, qword [ipc_request+IpcMessage.caps+IpcCap.handle]
@@ -586,6 +683,22 @@ close_handle:
 .done:
   ret
 
+;// Командная строка disk process занимает оставшиеся шесть IPC words.
+;// RDI=строка, RAX=длина 1..47 или 0, если NUL не помещается.
+bounded_command_length:
+  xor eax, eax
+.byte:
+  cmp eax, 47
+  jae .bad
+  cmp byte [rdi+rax], 0
+  je .done
+  inc eax
+  jmp .byte
+.bad:
+  xor eax, eax
+.done:
+  ret
+
 ;// Загрузить ELF64 в новый процесс.
 ;// RDI=image, RSI=size; (RDX,RCX) и (R8,R9) — дополнительные grants.
 ;// RAX=process cap, RDX=child endpoint cap; RAX<0 при ошибке.
@@ -652,6 +765,18 @@ load_program:
   test rax, rax
   js .cleanup
   mov r12, rax
+  call build_initial_stack
+  test rax, rax
+  js .close_frame_cleanup
+  mov [load_stack_pointer], rax
+  mov eax, SYS_FRAME_WRITE
+  mov rdi, r12
+  xor esi, esi
+  lea rdx, [initial_stack]
+  mov r10d, PAGE_SIZE
+  syscall
+  test rax, rax
+  js .close_frame_cleanup
   mov eax, SYS_SPACE_MAP
   mov rdi, [load_space]
   mov rsi, r12
@@ -667,9 +792,9 @@ load_program:
   mov rbx, [load_image]
   mov rax, [rbx+24]
   mov qword [thread_config+ThreadConfig.entry], rax
-  mov rax, USER_STACK_TOP
+  mov rax, [load_stack_pointer]
   mov qword [thread_config+ThreadConfig.stack_top], rax
-  sub rax, PAGE_SIZE
+  mov rax, USER_STACK_TOP-PAGE_SIZE
   mov qword [thread_config+ThreadConfig.stack_low], rax
   mov rax, USER_STACK_LIMIT
   mov qword [thread_config+ThreadConfig.stack_limit], rax
@@ -756,6 +881,75 @@ load_program:
   ;// RAX уже содержит errno.
 .done:
   add rsp, 8
+  pop r15
+  pop r14
+  pop r13
+  pop r12
+  pop rbx
+  ret
+
+;// Построить минимальный System V process stack для программ с argc/argv.
+;// Командная строка разделяется по пробелам без shell quoting — это осознанный
+;// первый ABI: пути VaraniaFS пока не содержат пробелов. RAX=initial RSP/error.
+STACK_ARG_TABLE = 0xE00
+STACK_STRING_AREA = 0xF00
+STACK_MAX_ARGS = 8
+build_initial_stack:
+  push rbx
+  push r12
+  push r13
+  push r14
+  push r15
+  lea rdi, [initial_stack]
+  mov ecx, PAGE_SIZE
+  call zero_bytes
+  mov rsi, [load_command]
+  xor r12d, r12d                 ;// argc
+  mov r13d, STACK_STRING_AREA    ;// destination offset
+  test rsi, rsi
+  jz .finish
+.skip_spaces:
+  cmp byte [rsi], ' '
+  jne .token_or_end
+  inc rsi
+  jmp .skip_spaces
+.token_or_end:
+  cmp byte [rsi], 0
+  je .finish
+  cmp r12, STACK_MAX_ARGS
+  jae .invalid
+  mov rax, USER_STACK_TOP-PAGE_SIZE
+  add rax, r13
+  mov qword [initial_stack+STACK_ARG_TABLE+8+r12*8], rax
+  inc r12
+.copy_token:
+  cmp r13, PAGE_SIZE-1
+  jae .invalid
+  mov al, [rsi]
+  test al, al
+  jz .end_token
+  cmp al, ' '
+  je .end_token
+  mov [initial_stack+r13], al
+  inc r13
+  inc rsi
+  jmp .copy_token
+.end_token:
+  mov byte [initial_stack+r13], 0
+  inc r13
+  cmp byte [rsi], 0
+  je .finish
+  inc rsi
+  jmp .skip_spaces
+.finish:
+  mov qword [initial_stack+STACK_ARG_TABLE], r12
+  mov qword [initial_stack+STACK_ARG_TABLE+8+r12*8], 0
+  mov qword [initial_stack+STACK_ARG_TABLE+16+r12*8], 0 ;// envp terminator
+  mov rax, USER_STACK_TOP-PAGE_SIZE+STACK_ARG_TABLE
+  jmp .done
+.invalid:
+  mov rax, -22
+.done:
   pop r15
   pop r14
   pop r13
@@ -955,6 +1149,16 @@ ready_text db "procd: init started; process service ready", 10
 .size = $-ready_text
 fatal_text db "procd: fatal bootstrap or IPC error", 10
 .size = $-fatal_text
+image_map_error_text db "procd: cannot map disk ELF shared window", 10
+.size = $-image_map_error_text
+image_bad_handle_text db "procd: disk ELF capability is not a readable shared object", 10
+.size = $-image_bad_handle_text
+image_busy_text db "procd: disk ELF virtual window is already occupied", 10
+.size = $-image_busy_text
+image_invalid_text db "procd: disk ELF shared mapping arguments are invalid", 10
+.size = $-image_invalid_text
+image_load_error_text db "procd: disk ELF validation or address-space load failed", 10
+.size = $-image_load_error_text
 init_name db "init.elf"
 .size = $-init_name
 keyboard_name db "keyboard.elf"
@@ -972,6 +1176,7 @@ align 8
 bootfs_base dq 0
 bootfs_size dq 0
 nvme_mmio_cap dq 0
+nameserver_cap dq 0
 pci_command dd 0
 pci_bar_low dd 0
 pci_bar_high dd 0
@@ -982,6 +1187,8 @@ load_size dq 0
 load_space dq 0
 load_endpoint dq 0
 load_process dq 0
+load_command dq 0
+load_stack_pointer dq 0
 load_extra1 dq 0
 load_extra1_rights dq 0
 load_extra2 dq 0
@@ -993,5 +1200,7 @@ policy_extra3_rights dq 0
 load_ph dq 0
 load_max_end dq 0
 thread_config rb ThreadConfig.bytes
+align PAGE_SIZE
+initial_stack rb PAGE_SIZE
 ipc_request rb IpcMessage.bytes
 response rb IpcMessage.bytes

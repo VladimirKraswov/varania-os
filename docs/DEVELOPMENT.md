@@ -20,6 +20,16 @@ bootstrap-зависимости.
 Использованные здесь `function`, `exception_stub`, `slab_class` и структурные
 смещения дают читаемый DSL, сохраняя обычный FASM build.
 
+В `/bin/fasm.elf` находится тот же официальный x64 assembler core. Маленький
+слой `src/fasm/platform.inc` перехватывает только требуемые upstream Linux ABI
+операции и переводит их в Varania IPC. Проверяемая guest-команда:
+
+```text
+run fasm.elf /system/t.asm /system/build/t.elf
+```
+
+Подробности и граница полного self-hosting описаны в [FASM.md](FASM.md).
+
 Официальные источники: [загрузки FASM](https://flatassembler.net/download.php),
 [руководство fasmg](https://flatassembler.net/docs.php?article=fasmg_manual).
 
@@ -44,7 +54,9 @@ make clean && make test
 11. shared mapping двух страниц, IPC transfer и возврат frames после teardown;
 12. PCIe/NVMe Identify, DMA Read/Write/Flush и восстановление test block;
 13. VaraniaFS COW/recovery/CRC32C на host и через ring-3 server;
-14. PS/2 → terminal → shell → VFS → NVMe, VGA и remount после записи.
+14. disk-only ELF через VFS shared capability и повторный `SHARED_UNMAP`;
+15. FASM внутри VM: source read, streaming output, запуск созданного ELF;
+16. PS/2 → terminal → shell → VFS → NVMe, VGA и remount после записи.
 
 Тесты можно запускать отдельно:
 
@@ -70,7 +82,8 @@ make run
 
 После self-tests пользовательский terminal очищает VGA, печатает приветствие и
 shell показывает `varania:/$`. Команда `ls` читает с NVMe каталог `system/`;
-доступны `cd`, `mkdir`, `touch`, `cat`, `write`, `pwd`, `clear`, `help`.
+доступны `cd`, `mkdir`, `touch`, `cat`, `write`, `append`, `run`, `pwd`,
+`clear`, `help`.
 
 На macOS Cocoa display запускается полноэкранно с `zoom-to-fit`, чтобы VGA
 80×25 не был слишком мелким на Retina. Для обычного масштабируемого окна:
@@ -82,7 +95,7 @@ VARANIA_QEMU_FULLSCREEN=0 make run
 Для диагностического вывода без окна:
 
 ```bash
-./c.sh run -display none -serial none -monitor none \
+./scripts/run-qemu.sh -display none -serial none -monitor none \
   -debugcon stdio -global isa-debugcon.iobase=0xe9
 ```
 

@@ -781,6 +781,8 @@ dispatch_request:
   je .write
   cmp rax, FS_STAT
   je .stat
+  cmp rax, FS_DETACH
+  je .detach
   mov qword [reply+IpcMessage.words], ERR_NOT_IMPL
   jmp .send
 .list:
@@ -808,6 +810,9 @@ dispatch_request:
   jmp .send
 .stat:
   call handle_stat
+  jmp .send
+.detach:
+  call handle_detach
 .send:
   ipc_send r12d, reply
   push rax
@@ -864,6 +869,7 @@ handle_attach:
   mov qword [reply+IpcMessage.caps+IpcCap.handle], rdx
   mov qword [reply+IpcMessage.caps+IpcCap.rights], CAP_MAP+CAP_READ+CAP_WRITE
   ret
+
 .map_error:
   push rax
   mov rdi, [session_handles+rbx*8]
@@ -873,6 +879,30 @@ handle_attach:
   jmp .error
 .no_space:
   mov rax, ERR_NO_SPACE
+.error:
+  mov qword [reply+IpcMessage.words], rax
+  ret
+
+;// Освободить per-client shared window. Нормально завершающиеся short-lived
+;// программы (например FASM) не должны навсегда занимать один из четырёх slots.
+handle_detach:
+  mov rdi, qword [request+IpcMessage.sender]
+  call session_for_sender
+  test rax, rax
+  js .error
+  mov rbx, rax
+  mov rdi, [session_bases+rbx*8]
+  mov eax, SYS_SHARED_UNMAP
+  syscall
+  test rax, rax
+  js .error
+  mov rdi, [session_handles+rbx*8]
+  close_cap rdi
+  mov qword [session_owners+rbx*8], 0
+  mov qword [session_handles+rbx*8], 0
+  mov qword [session_bases+rbx*8], 0
+  mov qword [reply+IpcMessage.words], 0
+  ret
 .error:
   mov qword [reply+IpcMessage.words], rax
   ret
@@ -1018,24 +1048,32 @@ handle_read:
   pop rbx
   ret
 
-;// WRITE v1 заменяет содержимое файла целиком: file offset обязан быть нулём.
-;// Новые data blocks пишутся перед новым catalog и никогда не портят active tree.
+;// Потоковая WRITE: object, file offset, byte count, window offset, flags.
+;//
+;// Частичная запись остаётся одной COW-транзакцией. Сервис собирает новую
+;// последовательность блоков, смешивая старые байты с новым диапазоном, и
+;// только потом публикует catalog. Текущая простая версия переписывает весь
+;// файл; extent log позже ускорит append, не меняя IPC ABI.
 handle_write:
   push rbx
   push r12
   push r13
   push r14
   push r15
-  cmp qword [request+IpcMessage.words+16], 0
-  jne .invalid
   mov rdi, qword [request+IpcMessage.sender]
   call session_for_sender
   test rax, rax
   js .error
   mov rbx, [session_bases+rax*8]
   mov r12, qword [request+IpcMessage.words+8]
+  mov rax, qword [request+IpcMessage.words+16]
+  mov [write_file_offset], rax
   mov r13, qword [request+IpcMessage.words+24]
   mov r14, qword [request+IpcMessage.words+32]
+  mov rax, qword [request+IpcMessage.words+40]
+  mov [write_flags], rax
+  test rax, not FS_WRITE_TRUNCATE
+  jnz .invalid
   cmp r13, FS_BUFFER_BYTES
   ja .invalid
   cmp r14, FS_BUFFER_BYTES
@@ -1045,22 +1083,37 @@ handle_write:
   jc .invalid
   cmp rax, FS_BUFFER_BYTES
   ja .invalid
-  add rbx, r14                   ;// source bytes
+  add rbx, r14
+  mov [write_source], rbx
+  mov [write_input_size], r13
+  mov rax, [write_file_offset]
+  add rax, r13
+  jc .invalid
+  mov [write_range_end], rax
+
   mov rdi, r12
   call object_to_index
   test rax, rax
   js .error
   cmp byte [entry_kinds+rax], FS_NODE_FILE
   jne .invalid
-  mov r12, rax                   ;// catalog index
-
-  mov rdi, rbx
-  mov rsi, r13
-  call crc32c
-  mov [write_checksum], eax
-  mov r15, r13
+  mov [write_entry_index], rax
+  mov rdi, rax
+  call entry_record
+  mov rdx, [rax+16]
+  mov [write_old_size], rdx
+  mov r15, [write_range_end]
+  test qword [write_flags], FS_WRITE_TRUNCATE
+  jnz .size_ready
+  cmp r15, rdx
+  jae .size_ready
+  mov r15, rdx
+.size_ready:
+  mov [write_new_size], r15
+  mov dword [write_checksum], 0
   add r15, PAGE_SIZE-1
-  shr r15, 12                    ;// data block count
+  jc .no_space
+  shr r15, 12
   mov rax, [allocation_cursor]
   mov [write_data_start], rax
   add rax, r15
@@ -1070,10 +1123,9 @@ handle_write:
   cmp rax, rdx
   ja .no_space
 
-  xor r14d, r14d                 ;// byte offset in client window
-  xor r15d, r15d                 ;// written blocks
+  xor r15d, r15d                 ;// logical block number
 .data_block:
-  mov rax, r13
+  mov rax, [write_new_size]
   add rax, PAGE_SIZE-1
   shr rax, 12
   cmp r15, rax
@@ -1081,23 +1133,75 @@ handle_write:
   mov rdi, VAFS_IO_VA
   mov ecx, PAGE_SIZE
   call zero_bytes
-  mov rdx, r13
-  sub rdx, r14
-  cmp rdx, PAGE_SIZE
-  jbe .chunk_ready
-  mov edx, PAGE_SIZE
-.chunk_ready:
-  mov [write_chunk], rdx
-  lea rsi, [rbx+r14]
-  mov rdi, VAFS_IO_VA
+
+  ;// Обычная WRITE начинает со старого блока. TRUNCATE и sparse gap уже нулевые.
+  test qword [write_flags], FS_WRITE_TRUNCATE
+  jnz .overlay
+  mov rax, r15
+  shl rax, 12
+  cmp rax, [write_old_size]
+  jae .overlay
+  mov rdi, [write_entry_index]
+  mov rsi, r15
+  call write_read_old_block
+  test rax, rax
+  jnz .reload_error
+  ;// После старого EOF страница может содержать не относящийся к файлу мусор.
+  mov rax, [write_old_size]
+  mov rdx, r15
+  shl rdx, 12
+  sub rax, rdx
+  cmp rax, PAGE_SIZE
+  jae .overlay
+  lea rdi, [VAFS_IO_VA+rax]
+  mov ecx, PAGE_SIZE
+  sub rcx, rax
+  call zero_bytes
+
+.overlay:
+  ;// Пересечение [block, block+4096) и [offset, offset+count).
+  mov r8, r15
+  shl r8, 12
+  mov r9, r8
+  add r9, PAGE_SIZE
+  mov rax, [write_file_offset]
+  cmp rax, r8
+  jae .overlay_start_ready
+  mov rax, r8
+.overlay_start_ready:
+  mov rdx, [write_range_end]
+  cmp rdx, r9
+  jbe .overlay_end_ready
+  mov rdx, r9
+.overlay_end_ready:
+  cmp rax, rdx
+  jae .checksum_block
   mov rcx, rdx
+  sub rcx, rax
+  mov rsi, rax
+  sub rsi, [write_file_offset]
+  add rsi, [write_source]
+  mov rdi, rax
+  sub rdi, r8
+  add rdi, VAFS_IO_VA
   rep movsb
+
+.checksum_block:
+  mov rsi, [write_new_size]
+  sub rsi, r8
+  cmp rsi, PAGE_SIZE
+  jbe .checksum_length_ready
+  mov esi, PAGE_SIZE
+.checksum_length_ready:
+  mov rdi, VAFS_IO_VA
+  mov eax, [write_checksum]
+  call crc32c_update
+  mov [write_checksum], eax
   mov rdi, [write_data_start]
   add rdi, r15
   call block_write
   test rax, rax
   jnz .reload_error
-  add r14, [write_chunk]
   inc r15
   jmp .data_block
 .data_done:
@@ -1106,7 +1210,7 @@ handle_write:
   mov [allocation_cursor], rax
 
   ;// Сохранить canonical path до замены raw record.
-  mov rdi, r12
+  mov rdi, [write_entry_index]
   call entry_path
   mov [new_path_length], dx
   mov rsi, rax
@@ -1117,19 +1221,19 @@ handle_write:
   mov ecx, ENTRY_HEADER+EXTENT_BYTES+MAX_PATH+8
   call zero_bytes
   mov eax, ENTRY_HEADER
-  test r13, r13
+  cmp qword [write_new_size], 0
   jz .record_path
   add eax, EXTENT_BYTES
   mov word [new_record+6], 1
   mov qword [new_record+ENTRY_HEADER], 0
   mov rdx, [write_data_start]
   mov qword [new_record+ENTRY_HEADER+8], rdx
-  mov rdx, r13
+  mov rdx, [write_new_size]
   add rdx, PAGE_SIZE-1
   shr rdx, 12
   mov dword [new_record+ENTRY_HEADER+16], edx
 .record_path:
-  mov edx, eax                   ;// path offset
+  mov edx, eax
   movzx ecx, word [new_path_length]
   add eax, ecx
   add eax, 7
@@ -1138,9 +1242,11 @@ handle_write:
   mov cx, [new_path_length]
   mov word [new_record+2], cx
   mov byte [new_record+4], FS_NODE_FILE
+  mov r12, [write_entry_index]
   mov rax, [entry_object_ids+r12*8]
   mov qword [new_record+8], rax
-  mov qword [new_record+16], r13
+  mov rax, [write_new_size]
+  mov qword [new_record+16], rax
   mov eax, [write_checksum]
   mov dword [new_record+32], eax
   lea rdi, [new_record+rdx]
@@ -1159,7 +1265,8 @@ handle_write:
   test rax, rax
   jnz .reload_error
   mov qword [reply+IpcMessage.words], 0
-  mov qword [reply+IpcMessage.words+8], r13
+  mov rax, [write_input_size]
+  mov qword [reply+IpcMessage.words+8], rax
   jmp .done
 .reload_error:
   push rax
@@ -1177,6 +1284,40 @@ handle_write:
   pop r15
   pop r14
   pop r13
+  pop r12
+  pop rbx
+  ret
+
+;// RDI=catalog index, RSI=logical block. Читает старый блок в VAFS_IO_VA.
+write_read_old_block:
+  push rbx
+  push r12
+  mov r12, rsi
+  call entry_record
+  movzx ecx, word [rax+6]
+  lea rbx, [rax+ENTRY_HEADER]
+.extent:
+  test ecx, ecx
+  jz .corrupt
+  mov rdx, [rbx]
+  cmp r12, rdx
+  jb .corrupt
+  mov eax, [rbx+16]
+  add rdx, rax
+  cmp r12, rdx
+  jb .found
+  add rbx, EXTENT_BYTES
+  dec ecx
+  jmp .extent
+.found:
+  mov rdi, r12
+  sub rdi, [rbx]
+  add rdi, [rbx+8]
+  call block_read
+  jmp .done
+.corrupt:
+  mov rax, ERR_CORRUPT
+.done:
   pop r12
   pop rbx
   ret
@@ -2010,10 +2151,12 @@ zero_bytes:
   rep stosb
   ret
 
-;// CRC32C Castagnoli. RDI=data, ESI=bytes, EAX=checksum.
-;// Таблица не скрывает алгоритм: восемь простых шагов соответствуют одному байту.
+;// CRC32C Castagnoli. crc32c начинает новую сумму, crc32c_update продолжает
+;// её по следующему фрагменту. Так checksum считается потоком страниц.
 crc32c:
-  mov eax, 0FFFFFFFFh
+  xor eax, eax
+crc32c_update:
+  not eax
 .next_byte:
   test esi, esi
   jz .finish
@@ -2088,9 +2231,16 @@ block_endpoint dq 0
 io_buffer_cap dq 0
 volume_blocks dq 0
 write_data_start dq 0
-write_chunk dq 0
 write_checksum dd 0
 align 8
+write_source dq 0
+write_input_size dq 0
+write_file_offset dq 0
+write_range_end dq 0
+write_old_size dq 0
+write_new_size dq 0
+write_entry_index dq 0
+write_flags dq 0
 session_owners rq SESSION_MAX
 session_handles rq SESSION_MAX
 session_bases rq SESSION_MAX

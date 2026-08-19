@@ -283,6 +283,7 @@ cursor_x dq 0
 cursor_y dq 0
 pending_reply dq 0
 line_length dq 0
-line_buffer rb 16
+;// LINE_MAX и storage обязаны меняться вместе: payload IPC даёт 47 байт плюс NUL.
+line_buffer rb LINE_MAX+1
 message rb IpcMessage.bytes
 reply rb IpcMessage.bytes

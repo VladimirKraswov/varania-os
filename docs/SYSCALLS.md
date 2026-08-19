@@ -51,6 +51,7 @@
 | 30 | `IO_WRITE32` | `io_cap`, `offset`, `value` | 0 |
 | 31 | `MMIO_CREATE` | `system_cap`, `physical`, `pages` | MMIO capability |
 | 32 | `DMA_CREATE` | `dma_pool_cap`, `pages` | contiguous shared cap, physical в `RDX` |
+| 33 | `SHARED_UNMAP` | `virtual` | удалить целое shared mapping по base |
 
 Основные errno: `-2` no entry, `-9` bad capability, `-11` queue/full slots,
 `-12` no memory, `-14` bad user pointer, `-16` busy, `-22` invalid argument,
@@ -117,7 +118,9 @@ map-ить (`-16`), потому что его ownership был бы неодн�
 AddressSpace по page-aligned адресу. Разрешены флаги `0` и `SPACE_MAP_WRITE`;
 исполняемое отображение невозможно. Для RW нужны `MAP|READ|WRITE`, для R —
 `MAP|READ`. Один объект можно передать через IPC и отобразить в нескольких
-процессах; mapping удерживает object ref до teardown address space.
+процессах; mapping удерживает object ref до `SHARED_UNMAP` или teardown address
+space. Unmap удаляет все PTE объекта, снимает mapping-ссылку и позволяет
+долгоживущему loader повторно использовать одно виртуальное окно.
 
 `MMIO_MAP` принимает page-aligned user address и capability типа MMIO с
 `MAP|READ|WRITE`. x86-64 не имеет write-only PTE, поэтому права явно отражают

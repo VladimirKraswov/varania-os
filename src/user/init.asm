@@ -25,6 +25,13 @@ start:
   call close_handle                 ;// nameserver долгоживущий
   mov r12, rdx                      ;// endpoint nameserver
 
+  ;// После bootstrap procd становится обычным discoverable сервисом. Сам
+  ;// nameserver передаётся ему отдельно: загруженные с диска приложения
+  ;// получают его как handle 2 и дальше сами находят VFS/terminal/драйверы.
+  call configure_process_service
+  test rax, rax
+  jnz init_failed
+
   lea rdi, [service_name]
   mov esi, service_name.size
   mov rdx, r12
@@ -250,6 +257,37 @@ spawn:
   pop r13
   pop r12
   pop rbx
+  ret
+
+;// Передать procd endpoint nameserver и зарегистрировать его control endpoint.
+;// Это единственная bootstrap-связка; после неё shell использует lookup(5).
+configure_process_service:
+  lea rdi, [rpc_message]
+  mov ecx, IpcMessage.bytes
+  xor eax, eax
+  rep stosb
+  mov qword [rpc_message+IpcMessage.words], PROCD_CONFIGURE
+  mov qword [rpc_message+IpcMessage.cap_count], 1
+  mov qword [rpc_message+IpcMessage.caps+IpcCap.handle], r12
+  mov qword [rpc_message+IpcMessage.caps+IpcCap.rights], CAP_SEND
+  ipc_send PROCD_EP, rpc_message
+  test rax, rax
+  jnz .done
+
+  lea rdi, [rpc_message]
+  mov ecx, IpcMessage.bytes
+  xor eax, eax
+  rep stosb
+  mov qword [rpc_message+IpcMessage.words], NAMESERVER_REGISTER
+  mov qword [rpc_message+IpcMessage.words+8], SERVICE_PROCESS
+  mov qword [rpc_message+IpcMessage.cap_count], 1
+  mov qword [rpc_message+IpcMessage.caps+IpcCap.handle], PROCD_EP
+  mov qword [rpc_message+IpcMessage.caps+IpcCap.rights], CAP_SEND
+  mov rdi, r12
+  lea rsi, [rpc_message]
+  mov eax, SYS_IPC_SEND
+  syscall
+.done:
   ret
 
 spawn_lifecycle:
