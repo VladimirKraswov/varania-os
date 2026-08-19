@@ -15,6 +15,7 @@ CAP_ENDPOINT = 5
 CAP_FRAME    = 6
 CAP_SPACE    = 7
 CAP_BOOTFS   = 8
+CAP_SHARED   = 9
 
 CAP_SEND     = 1
 CAP_READ     = 2
@@ -33,7 +34,17 @@ Frame.physical = 16
 Frame.bytes    = 32
 
 AddressSpace.cr3   = 16
+AddressSpace.shared_head = 24
 AddressSpace.bytes = 32
+
+SHARED_MAX_PAGES = 16
+SharedMemory.page_count = 16
+SharedMemory.frames     = 24       ;// SHARED_MAX_PAGES qword
+SharedMemory.bytes      = 152
+
+SharedMapping.next = 0
+SharedMapping.shm  = 8
+SharedMapping.bytes = 16
 
 ENDPOINT_QUEUE_SIZE = 8
 IPC_WORD_COUNT      = 4
@@ -49,7 +60,8 @@ Endpoint.cap_count    = 368        ;// 8 qword
 Endpoint.cap_target   = 432        ;// 8 * 2 qword
 Endpoint.cap_rights   = 560        ;// 8 * 2 qword
 Endpoint.cap_type     = 688        ;// 8 * 2 qword
-Endpoint.bytes        = 816
+Endpoint.cap_node     = 816        ;// ghost lineage node на время enqueue
+Endpoint.bytes        = 944
 
 ;// Тип использует heap object и участвует в refcount.
 leaf_function object_is_reference_counted
@@ -58,6 +70,8 @@ leaf_function object_is_reference_counted
   cmp edi, CAP_FRAME
   je .yes
   cmp edi, CAP_SPACE
+  je .yes
+  cmp edi, CAP_SHARED
   je .yes
   xor eax, eax
   ret
@@ -72,6 +86,8 @@ leaf_function object_retain
   cmp edi, CAP_FRAME
   je .retain
   cmp edi, CAP_SPACE
+  je .retain
+  cmp edi, CAP_SHARED
   jne .done
   .retain:
   inc qword [rsi+Object.refs]
@@ -140,6 +156,7 @@ function address_space_create
   mov qword [rbx+Object.type], CAP_SPACE
   mov qword [rbx+Object.refs], 1
   mov [rbx+AddressSpace.cr3], rax
+  mov qword [rbx+AddressSpace.shared_head], 0
   mov rax, rbx
   jmp .done
   .free_object:
@@ -149,6 +166,66 @@ function address_space_create
   xor eax, eax
   .done:
   add rsp, 8
+  pop rbx
+endf
+
+;// Создать shared-memory object из 1..16 обнулённых frames. RDI=page count.
+function shared_memory_create
+  push rbx
+  push r12
+  push r13
+  push r14
+  mov r12, rdi
+  test r12, r12
+  jz .failed
+  cmp r12, SHARED_MAX_PAGES
+  ja .failed
+  mov edi, SharedMemory.bytes
+  call kmalloc
+  test rax, rax
+  jz .failed
+  mov rbx, rax
+  mov rdi, rax
+  xor eax, eax
+  mov ecx, SharedMemory.bytes/8
+  rep stosq
+  mov qword [rbx+Object.type], CAP_SHARED
+  mov qword [rbx+Object.refs], 1
+  mov [rbx+SharedMemory.page_count], r12
+  xor r13d, r13d
+  .frame:
+    cmp r13, r12
+    jae .success
+    call pmm_alloc_frame
+    test rax, rax
+    jz .rollback
+    mov [rbx+SharedMemory.frames+r13*8], rax
+    mov r14, rax
+    hhdm_address rdi, rax
+    xor esi, esi
+    mov edx, PAGE_SIZE
+    call memory_set
+    inc r13
+    jmp .frame
+  .rollback:
+    test r13, r13
+    jz .free_object
+    dec r13
+    mov rdi, [rbx+SharedMemory.frames+r13*8]
+    call pmm_free_frame
+    jmp .rollback
+  .free_object:
+  mov rdi, rbx
+  call kfree
+  .failed:
+  xor eax, eax
+  jmp .done
+  .success:
+  mov rax, rbx
+  .done:
+  pop r14
+  pop r13
+  pop r12
   pop rbx
 endf
 
@@ -167,6 +244,8 @@ function object_release
   cmp r12d, CAP_FRAME
   je .decrement
   cmp r12d, CAP_SPACE
+  je .decrement
+  cmp r12d, CAP_SHARED
   jne .done
   .decrement:
   dec qword [rbx+Object.refs]
@@ -175,6 +254,8 @@ function object_release
   je .destroy_frame
   cmp r12d, CAP_SPACE
   je .destroy_space
+  cmp r12d, CAP_SHARED
+  je .destroy_shared
 
   ;// Endpoint: очередь сама удерживает переданные объекты.
   mov r13, [rbx+Endpoint.head]
@@ -197,6 +278,16 @@ function object_release
       call capability_release
       pop rdx
       pop rcx
+      mov rax, r13
+      shl rax, 1
+      add rax, rdx
+      push rcx
+      push rdx
+      mov rdi, [rbx+Endpoint.cap_node+rax*8]
+      mov qword [rdi+CapNode.pinned], 0
+      call cap_node_prune
+      pop rdx
+      pop rcx
       inc rdx
       jmp .message_cap
   .next_message:
@@ -210,8 +301,31 @@ function object_release
   call pmm_free_frame
   jmp .free_object
   .destroy_space:
+  ;// Сначала удаляем borrowed PTE и лишь затем отпускаем SharedMemory. Такой
+  ;// порядок гарантирует, что физические кадры живут дольше всех отображений.
+  mov r13, [rbx+AddressSpace.shared_head]
   mov rdi, [rbx+AddressSpace.cr3]
   call vmm_destroy_space
+  .shared_mapping:
+    test r13, r13
+    jz .free_object
+    mov r14, [r13+SharedMapping.next]
+    mov edi, CAP_SHARED
+    mov rsi, [r13+SharedMapping.shm]
+    call object_release
+    mov rdi, r13
+    call kfree
+    mov r13, r14
+    jmp .shared_mapping
+  .destroy_shared:
+  xor r13d, r13d
+  .shared_frame:
+    cmp r13, [rbx+SharedMemory.page_count]
+    jae .free_object
+    mov rdi, [rbx+SharedMemory.frames+r13*8]
+    call pmm_free_frame
+    inc r13
+    jmp .shared_frame
   .free_object:
   mov rdi, rbx
   call kfree

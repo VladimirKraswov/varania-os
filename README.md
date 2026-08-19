@@ -14,14 +14,17 @@ Varania OS — небольшая 64-битная capability-based ОС на Fla
 - переход `real mode → protected mode → long mode`, PAE и 4-level paging;
 - ring 0/ring 3, TSS64, IST для double fault, IDT64, SYSCALL и NX;
 - PMM по E820, slab allocator и полное разрушение user address space;
-- отдельные kernel-объекты `AddressSpace`, `Frame`, `Endpoint` и TCB thread;
+- kernel-объекты `AddressSpace`, `Frame`, `Endpoint`, `SharedMemory` и TCB;
 - capability handles с проверкой типа/прав и refcount heap-объектов;
 - endpoint IPC: очередь на 8 сообщений, 4 слова и до 2 capabilities в каждом;
 - attenuation прав и атомарный `CAP_MOVE` после успешного enqueue;
+- дерево происхождения capabilities и рекурсивный revoke всех descendants;
 - low-level API `space/frame/map/thread`, не знающий имён и формата ELF;
 - user-space `procd`: initramfs, проверка ELF64, BSS, W^X и запуск thread;
 - user-space `nameserver`: регистрация и discovery endpoint-capabilities;
-- динамические процессы, generation-safe process token, `EXIT`/`WAIT`;
+- динамические процессы, generation-safe token, `EXIT`/`WAIT` и внешний kill;
+- user-space supervisor: restart policy остаётся вне привилегированного ядра;
+- shared-memory objects до 16 страниц и передача доступа через endpoint IPC;
 - многостраничные code/data, heap через `BRK`, stack growth через #PF;
 - вытесняющий round-robin с квантом 10 мс;
 - user-space PS/2 keyboard driver с правами только на IRQ1 и `0x60..0x64`;
@@ -37,6 +40,10 @@ VARANIA:IPC_QUEUE_OK
 VARANIA:MEMORY_OK
 VARANIA:ISOLATION_OK
 VARANIA:LIFECYCLE_OK
+VARANIA:REVOKE_OK
+VARANIA:KILL_OK
+VARANIA:SUPERVISOR_OK
+VARANIA:SHM_OK
 VARANIA:MICROKERNEL_OK
 ```
 
@@ -73,12 +80,15 @@ Docker не требуется.
 
 | Команда | Назначение |
 |---|---|
-| `make build` | boot, kernel, девять user ELF, initramfs и raw image |
+| `make build` | boot, kernel, 15 user ELF, initramfs и raw image |
 | `make check` | структура диска, initramfs и каждого ELF/PT_LOAD |
 | `make smoke` | полный boot и IRQ1 через QMP |
 | `make test-capabilities` | procd, nameserver, capability transfer и IPC queue |
 | `make test-isolation` | code/data/heap/stack и supervisor HHDM isolation |
 | `make test-lifecycle` | create/exit/wait/teardown и возврат frames |
+| `make test-revoke` | дерево capability lineage и рекурсивный revoke |
+| `make test-supervisor` | kill заблокированного процесса и два restart |
+| `make test-shared` | две общие страницы, IPC transfer и teardown |
 | `make test` | все статические и QEMU-тесты |
 | `make run` | интерактивный QEMU |
 | `make debug` | QEMU с `qemu-debug.log` |
@@ -94,10 +104,12 @@ flowchart LR
     R["read-only initramfs"] -->|"mapping + bootfs cap"| P
     P -->|"space/frame/map/thread"| K
     P --> I["user/init"]
+    I --> V["supervisor"]
     I --> N["nameserver"]
     N --> S["service endpoint"]
     N --> C["client"]
     I --> D["keyboard driver"]
+    I --> H["shared-memory peers"]
 ```
 
 Ядро знает только bootstrap-имя `procd.elf`. Procd получает read-only mapping
@@ -117,7 +129,8 @@ src/kernel/amd64/ipc.inc        endpoint queues и capability transfer
 src/kernel/amd64/device.inc     IRQ/I/O capabilities
 src/kernel/amd64/syscall.inc    low-level user ABI
 src/user/procd.asm              initramfs + ELF64 loader + process service
-src/user/init.asm               supervisor и интеграционный сценарий
+src/user/init.asm               запуск сервисов и интеграционный сценарий
+src/user/supervisor.asm         внешний kill и restart policy
 src/user/nameserver.asm         user-space service discovery
 src/user/*.asm                  сервисы, драйвер и тестовые процессы
 tests/                          structural и headless QEMU tests
@@ -141,10 +154,11 @@ tests/                          structural и headless QEMU tests
 - initramfs фиксирован на 64 KiB; нет VFS, дискового сервера и сети;
 - только статические `ET_EXEC`; нет PIE, relocations и dynamic linker;
 - stack ограничен 16 страницами, heap — 256 страницами;
-- IPC payload мал и копируется; shared-memory protocol ещё не реализован;
-- нет external kill, fork, signals и POSIX runtime;
+- IPC control payload мал и копируется; для bulk data есть shared memory, но
+  пока без частичного unmap и resize;
+- нет fork, signals и POSIX runtime; restart policy пока демонстрационная;
 - IRQ/I/O покрывают PS/2; для MMIO/DMA нужны Frame/IRQ policy и IOMMU;
-- нет ASLR, SMEP/SMAP, SMP-locking и глобального revoke дерева capabilities;
+- нет ASLR, SMEP/SMAP, SMP-locking и transfer между несколькими CPU;
 - cyclic endpoint capabilities могут образовать логический цикл владения.
 
 Эти ограничения задокументированы как границы следующего этапа, а не скрыты

@@ -38,6 +38,9 @@
 | user fault | останавливал ядро | завершает один процесс |
 | программы | встроенные flat blobs | ELF64 из initramfs, user/init |
 | lifecycle | фиксированные задачи | spawn/wait, generations, teardown |
+| supervision | отсутствовала | external kill + user-space restart policy |
+| shared data | только копирование | refcounted shared-memory objects |
+| revoke | плоские handles | lineage tree, ghost queue nodes, descendants revoke |
 
 Identity map оставлена только в bootstrap PML4. Пользовательские PML4 получают
 свою нижнюю половину и общую supervisor-only HHDM branch. GDT также

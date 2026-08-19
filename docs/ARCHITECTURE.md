@@ -18,7 +18,10 @@ ELF, создаёт space/frames/mappings/thread. `init` решает, каки�
 
 ```mermaid
 flowchart TB
-    I["user/init — supervisor policy"] -->|"spawn RPC"| P["user/procd — ELF loader"]
+    I["user/init — system policy"] -->|"spawn RPC"| P["user/procd — ELF loader"]
+    I --> V["user/supervisor — kill/restart"]
+    V -->|"spawn RPC"| P
+    V -->|"PROCESS_KILL / WAIT"| K
     C["client"] -->|"lookup RPC"| N["user/nameserver"]
     N -->|"endpoint capability"| C
     C -->|"queued message"| S["service"]
@@ -79,6 +82,7 @@ User layout:
 | Диапазон | Назначение |
 |---|---|
 | `0x00010000..0x3FFFFFFF` | ELF `PT_LOAD` и heap |
+| `0x40000000..0x7FFFFFFF` | convention для user object/shared mappings |
 | `0x80000000..0x8000FFFF` | bootfs, только procd, R+NX |
 | до `0x00007FFFFFF00000` | растущий user stack |
 
@@ -96,6 +100,7 @@ Heap начинается с выровненного максимального
 | `Endpoint` | heap object + queue | strong refcount |
 | `Frame` | heap metadata + physical frame | strong refcount до map |
 | `AddressSpace` | heap metadata + CR3 | strong refcount |
+| `SharedMemory` | metadata + 1..16 frames | strong refcount, много mappings |
 | `Process` | slot+generation token | таблица TCB + WAIT lifecycle |
 | `IRQ` | irq+1 | уникальная маршрутизация |
 | `I/O` | base+length | value capability |
@@ -115,6 +120,34 @@ Frame capability -> SPACE_MAP -> leaf PTE -> AddressSpace teardown -> PMM
 
 После успешного map capability потребляется, metadata Frame уничтожается, а
 physical frame освобождается только вместе с mapping/address space.
+
+Shared-memory использует другой ownership:
+
+```text
+SharedMemory object -> physical frames
+AddressSpace mapping -> strong ref на SharedMemory + borrowed PTE
+```
+
+Флаг `PAGE.SHARED` занимает software-доступный бит PTE. Поэтому обычный teardown
+не освобождает borrowed leaf frame. Сначала уничтожаются PTE конкретного space,
+затем его mapping records отпускают SharedMemory; последний ref возвращает все
+кадры PMM. Отображения всегда NX, могут быть read-only или RW и живут до
+разрушения address space. Частичного `unmap` в текущем ABI нет.
+
+## Дерево происхождения capabilities
+
+Каждая занятая slot связана с `CapNode`: parent, список children, владелец и
+номер slot. Создание kernel-object образует новый root, а clone, thread grant и
+IPC transfer — descendant. Пока capability лежит в endpoint queue, её
+происхождение хранит pinned ghost node; поэтому закрытие или `CAP_MOVE` source
+не разрывает будущую цепочку receiver.
+
+`CAP_REVOKE(handle)` сохраняет сам handle и рекурсивно закрывает все полученные
+из него descendants во всех процессах и очередях. Закрытый узел без владельца
+остаётся ghost, пока живы дети, и затем автоматически вырезается. Так supervisor
+может отозвать делегированные права, не перебирая таблицы чужих процессов.
+Если отозванный descendant ещё находился в очереди, всё сообщение атомарно
+отменяется при receive: payload без части заявленных handles не доставляется.
 
 ## Endpoint IPC
 
@@ -140,6 +173,7 @@ stateDiagram-v2
     SUSPENDED --> RUNNABLE: THREAD_START
     RUNNABLE --> BLOCKED: endpoint / IRQ / WAIT
     BLOCKED --> RUNNABLE: message / IRQ / exit status
+    BLOCKED --> ZOMBIE: внешний PROCESS_KILL
     RUNNABLE --> ZOMBIE: EXIT или user fault
     ZOMBIE --> REAPABLE: teardown на чужом CR3/stack
     REAPABLE --> [*]: WAIT освобождает TCB slot
@@ -149,6 +183,12 @@ Process token равен `generation:32 | (slot+1):32`, поэтому стар�
 указывает на новый TCB после reuse. Текущий process нельзя разрушать на его же
 CR3/kernel stack: exit только меняет state; безопасная следующая задача снимает
 capabilities, AddressSpace ref, page tables, frames и kernel-stack frame.
+
+`PROCESS_KILL` требует `CAP_CONTROL`, запрещает self-kill этим интерфейсом и
+снимает цель с ожидания endpoint, IRQ или другого процесса. Далее используется
+тот же deferred teardown, что для `EXIT` и user fault. Пример
+`user/supervisor` показывает policy отдельно от механизма: завершает
+заблокированную цель, ждёт status и дважды создаёт новый worker после отказа.
 
 ## Scheduler и faults
 

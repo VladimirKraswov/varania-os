@@ -185,9 +185,11 @@ function device_commit_irq_transfers
       jne .next_parent
       cmp [r13+Task.cap_target+rcx*8], r14
       jne .next_parent
-      mov qword [r13+Task.cap_target+rcx*8], 0
-      mov qword [r13+Task.cap_rights+rcx*8], 0
-      mov qword [r13+Task.cap_type+rcx*8], 0
+      push rcx
+      mov rdi, r13
+      mov rsi, rcx
+      call capability_clear_slot
+      pop rcx
     .next_parent:
       inc ecx
       cmp ecx, CAP_SLOTS

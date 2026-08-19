@@ -9,7 +9,9 @@ INITRAMFS_IMAGE := INITRAMFS.BIN
 DISK_IMAGE   := VOS.VHD
 
 USER_BUILD := build/user
-USER_PROGRAMS := procd init nameserver service client keyboard memory_test isolation_test lifecycle_child
+USER_PROGRAMS := procd init nameserver service client keyboard memory_test isolation_test \
+		 lifecycle_child cap_revoke_test supervisor kill_target restart_worker \
+		 shm_receiver shm_sender
 USER_ELFS := $(addprefix $(USER_BUILD)/,$(addsuffix .elf,$(USER_PROGRAMS)))
 
 BOOT_SOURCES := src/boot/boot.asm src/boot/disk.inc \
@@ -17,7 +19,8 @@ BOOT_SOURCES := src/boot/boot.asm src/boot/disk.inc \
 KERNEL_SOURCES := src/kernel/kernel.asm src/const.inc \
                   $(wildcard src/kernel/amd64/*.inc)
 
-.PHONY: all build check smoke test-capabilities test-isolation test-lifecycle test run debug clean help
+.PHONY: all build check smoke test-capabilities test-isolation test-lifecycle \
+	test-revoke test-supervisor test-shared test run debug clean help
 
 all: build
 
@@ -55,7 +58,16 @@ test-lifecycle: check
 test-capabilities: check
 	python3 tests/test_capability_ipc.py
 
-test: smoke test-capabilities test-isolation test-lifecycle
+test-revoke: check
+	python3 tests/test_capability_revoke.py
+
+test-supervisor: check
+	python3 tests/test_supervisor.py
+
+test-shared: check
+	python3 tests/test_shared_memory.py
+
+test: smoke test-capabilities test-isolation test-lifecycle test-revoke test-supervisor test-shared
 
 run: check
 	$(QEMU_RUNNER)
@@ -76,5 +88,8 @@ help:
 	  'make test-capabilities — отдельно проверить endpoint/capability transfer' \
 	  'make test-isolation — отдельный QEMU-тест памяти и изоляции' \
 	  'make test-lifecycle — отдельный QEMU-тест create/exit/wait/teardown' \
+	  'make test-revoke — проверить дерево происхождения и revoke descendants' \
+	  'make test-supervisor — проверить внешний kill и restart policy' \
+	  'make test-shared — проверить межпроцессную shared memory и IPC' \
 	  'make debug  — QEMU с журналом прерываний/ошибок' \
 	  'make clean  — удалить только создаваемые сборкой файлы'

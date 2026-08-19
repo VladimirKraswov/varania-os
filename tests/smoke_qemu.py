@@ -95,7 +95,9 @@ def main() -> None:
             }
             qmp.sendall(json.dumps(command).encode() + b"\n")
             qmp.recv(4096)
-        remaining, _ = process.communicate(timeout=10)
+        # После добавления supervisor/revoke/shared-memory сценариев холодный
+        # TCG на CI иногда подходит вплотную к 10 секундам.
+        remaining, _ = process.communicate(timeout=20)
         output = bytes(captured) + remaining
     except subprocess.TimeoutExpired:
         process.kill()

@@ -29,6 +29,12 @@ EXPECTED_PROGRAMS = {
     "memory_test.elf",
     "isolation_test.elf",
     "lifecycle_child.elf",
+    "cap_revoke_test.elf",
+    "supervisor.elf",
+    "kill_target.elf",
+    "restart_worker.elf",
+    "shm_receiver.elf",
+    "shm_sender.elf",
 }
 
 

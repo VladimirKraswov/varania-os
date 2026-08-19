@@ -40,7 +40,23 @@ function ipc_endpoint_deliver
   mov r13, [rbx+Endpoint.head]
   mov r14, [rbx+Endpoint.cap_count+r13*8]
 
+  ;// Revoke queued capability отменяет сообщение целиком. Это сохраняет
+  ;// атомарность: receiver не увидит payload без части ожидаемых handles.
+  xor eax, eax
+  .scan_revoked:
+    cmp rax, r14
+    jae .check_slots
+    mov rcx, r13
+    shl rcx, 1
+    add rcx, rax
+    mov rdx, [rbx+Endpoint.cap_node+rcx*8]
+    cmp qword [rdx+CapNode.revoked], 0
+    jne .drop_revoked
+    inc rax
+    jmp .scan_revoked
+
   ;// Сначала убеждаемся, что receiver способен принять все handles.
+  .check_slots:
   mov rdi, r12
   call capability_free_count
   cmp rax, r14
@@ -85,10 +101,11 @@ function ipc_endpoint_deliver
     mov rsi, [rbx+Endpoint.cap_type+rax*8]
     mov rdx, [rbx+Endpoint.cap_target+rax*8]
     mov rcx, [rbx+Endpoint.cap_rights+rax*8]
-    call capability_insert_task
-    ;// Свободные slots посчитаны заранее, поэтому ошибка означает corruption.
+    mov r8, [rbx+Endpoint.cap_node+rax*8]
+    call capability_insert_task_derived
+    ;// Slots посчитаны заранее, но allocation lineage node ещё может отказать.
     test rax, rax
-    jz .would_block
+    jz .insert_failed
     mov rcx, r15
     shl rcx, 4
     mov [rsp+IpcMessage.caps+rcx+IpcCap.handle], rax
@@ -121,6 +138,12 @@ function ipc_endpoint_deliver
     mov rdi, [rbx+Endpoint.cap_type+rax*8]
     mov rsi, [rbx+Endpoint.cap_target+rax*8]
     call capability_release
+    mov rax, r13
+    shl rax, 1
+    add rax, r15
+    mov rdi, [rbx+Endpoint.cap_node+rax*8]
+    mov qword [rdi+CapNode.pinned], 0
+    call cap_node_prune
     inc r15
     jmp .release_cap
   .dequeue:
@@ -131,13 +154,44 @@ function ipc_endpoint_deliver
   xor eax, eax
   jmp .done
 
+  .drop_revoked:
+  xor r15d, r15d
+  .drop_cap:
+    cmp r15, r14
+    jae .drop_message
+    mov rax, r13
+    shl rax, 1
+    add rax, r15
+    mov rdi, [rbx+Endpoint.cap_type+rax*8]
+    mov rsi, [rbx+Endpoint.cap_target+rax*8]
+    call capability_release
+    mov rax, r13
+    shl rax, 1
+    add rax, r15
+    mov rdi, [rbx+Endpoint.cap_node+rax*8]
+    mov qword [rdi+CapNode.pinned], 0
+    call cap_node_prune
+    inc r15
+    jmp .drop_cap
+  .drop_message:
+  inc r13
+  and r13d, ENDPOINT_QUEUE_SIZE-1
+  mov [rbx+Endpoint.head], r13
+  dec qword [rbx+Endpoint.count]
+  mov rax, IPC_BAD_HANDLE
+  jmp .done
+
   ;// Этот путь практически недостижим после предварительной validation, но
   ;// rollback сохраняет инвариант при будущей многопоточности address space.
   .fault_after_caps:
+  mov qword [rsp+80], -14
   mov r15, r14
+  jmp .rollback
+  .insert_failed:
+  mov qword [rsp+80], -12
   .rollback:
     test r15, r15
-    jz .fault
+    jz .rollback_done
     dec r15
     mov rcx, r15
     shl rcx, 4
@@ -148,6 +202,9 @@ function ipc_endpoint_deliver
     mov rdi, r12
     call capability_clear_slot
     jmp .rollback
+  .rollback_done:
+  mov rax, [rsp+80]
+  jmp .done
   .fault:
   mov rax, -14
   jmp .done
@@ -216,7 +273,7 @@ function ipc_endpoint_send
   push r13
   push r14
   push r15
-  sub rsp, 152
+  sub rsp, 184
   mov r12, rdi
   mov r13, rsi
   mov esi, CAP_ENDPOINT
@@ -268,6 +325,13 @@ function ipc_endpoint_send
     mov [rsp+80+r13*8], rax       ;// target
     mov [rsp+96+r13*8], rdx       ;// type
     mov [rsp+112+r13*8], r12      ;// weakened rights
+    mov r10, r8
+    mov edi, [current_task]
+    call task_by_index
+    mov rax, [rax+Task.cap_node+r10*8]
+    test rax, rax
+    jz .bad_handle
+    mov [rsp+144+r13*8], rax      ;// lineage source
     mov rax, r13
     shl rax, 4
     bt qword [rsp+IpcMessage.caps+rax+IpcCap.rights], 63
@@ -291,6 +355,31 @@ function ipc_endpoint_send
   cmp rax, r15
   jb .would_block
   .enqueue_ready:
+  ;// Queue получает ghost child каждого source node. Он переживает MOVE/close
+  ;// отправителя и становится родителем handle, созданного receiver-у.
+  xor r13d, r13d
+  .lineage_node:
+    cmp r13, r15
+    jae .lineage_ready
+    mov rdi, [rsp+144+r13*8]
+    xor esi, esi
+    mov rdx, -1
+    call cap_node_create
+    test rax, rax
+    jz .lineage_failed
+    mov [rsp+160+r13*8], rax
+    mov qword [rax+CapNode.pinned], 1
+    inc r13
+    jmp .lineage_node
+  .lineage_failed:
+    test r13, r13
+    jz .no_memory
+    dec r13
+    mov rdi, [rsp+160+r13*8]
+    mov qword [rdi+CapNode.pinned], 0
+    call cap_node_prune
+    jmp .lineage_failed
+  .lineage_ready:
   mov r12, [rbx+Endpoint.tail]
   mov edi, [current_task]
   call task_by_index
@@ -321,6 +410,8 @@ function ipc_endpoint_send
     mov [rbx+Endpoint.cap_type+rax*8], rcx
     mov rdx, [rsp+112+r13*8]
     mov [rbx+Endpoint.cap_rights+rax*8], rdx
+    mov rdx, [rsp+160+r13*8]
+    mov [rbx+Endpoint.cap_node+rax*8], rdx
     mov rdi, rcx
     mov rsi, [rsp+80+r13*8]
     call object_retain            ;// queue ownership
@@ -364,10 +455,13 @@ function ipc_endpoint_send
   .fault:
   mov rax, -14
   jmp .done
+  .no_memory:
+  mov rax, -12
+  jmp .done
   .invalid:
   mov rax, -22
   .done:
-  add rsp, 152
+  add rsp, 184
   pop r15
   pop r14
   pop r13

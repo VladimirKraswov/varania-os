@@ -31,14 +31,17 @@ make clean && make test
 
 Проверяются:
 
-1. сборка boot/kernel, девяти user ELF, initramfs и raw image;
+1. сборка boot/kernel, 15 user ELF, initramfs и raw image;
 2. `55 AA`, размеры, точная конкатенация и SHA-256 FASM;
 3. каждый ELF header/program header, file bounds, W^X и page overlap;
 4. многостраничные RX/RW segments `memory_test.elf`;
 5. реальная загрузка `qemu-system-x86_64` в TCG;
 6. user procd, nameserver, capability transfer и четыре endpoint-сообщения;
 7. BSS, heap shrink/regrow, demand-growth stack и HHDM isolation;
-8. create/exit/wait, deferred teardown, возврат frames и slot reuse.
+8. create/exit/wait, deferred teardown, возврат frames и slot reuse;
+9. lineage tree, revoke двух поколений и сохранение root capability;
+10. внешний kill blocked task и два перезапуска user-space supervisor;
+11. shared mapping двух страниц, IPC transfer и возврат frames после teardown.
 
 Тесты можно запускать отдельно:
 
@@ -47,6 +50,9 @@ make smoke
 make test-capabilities
 make test-isolation
 make test-lifecycle
+make test-revoke
+make test-supervisor
+make test-shared
 ```
 
 TCG одинаково работает на Mac ARM и Linux и не требует KVM/HVF. Каждый
@@ -80,6 +86,9 @@ make debug
 - `terminated user task ... 0E` — ожидаемый #PF isolation test;
 - нет `MICROKERNEL_OK` — проверить Context offsets, CR3, IPC и capabilities;
 - нет `LIFECYCLE_OK` — проверить deferred teardown и `pmm_free_count`;
+- нет `REVOKE_OK` — проверить CapNode parent/ghost/pinned и rollback IPC;
+- нет `SUPERVISOR_OK` — проверить CONTROL grant, cancel block и WAIT status;
+- нет `SHM_OK` — проверить borrowed PTE, mapping ref и права shared cap;
 - IRQ storm — проверить one-shot mask/unmask и сброс состояния устройства.
 
 ## Правила кода
@@ -92,7 +101,9 @@ make debug
 - новый user frame должен быть обнулён до установки mapping;
 - capability всегда проверяется по handle, type и rights;
 - heap capability создаёт сильную ссылку, queue transfer — отдельную ссылку;
+- производная capability всегда получает CapNode parent; queue node pinned;
 - успешный `SPACE_MAP` потребляет frame и передаёт ownership leaf mapping;
+- shared PTE не владеет frame и обязан удерживаться mapping-ссылкой на object;
 - process object хранит token с generation, не голый slot;
 - у IRQ и SYSCALL должен оставаться единый `Context`;
 - текущий CR3/kernel stack нельзя освобождать на exit path;

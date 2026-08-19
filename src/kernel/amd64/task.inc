@@ -25,10 +25,11 @@ Task.wait_cap     = 120
 Task.cap_target   = 128             ;// CAP_SLOTS qword
 Task.cap_rights   = 256
 Task.cap_type     = 384
-Task.space         = 512             ;// AddressSpace object для low-level create
-Task.wait_endpoint = 520             ;// Endpoint object при блокировке IPC
-Task.wait_buffer   = 528             ;// user IpcMessage*
-Task.size          = 536
+Task.cap_node     = 512             ;// lineage node для revoke descendants
+Task.space         = 640            ;// AddressSpace object для low-level create
+Task.wait_endpoint = 648            ;// Endpoint object при блокировке IPC
+Task.wait_buffer   = 656            ;// user IpcMessage*
+Task.size          = 664
 
 Context.r15      = 0
 Context.r14      = 8
@@ -64,6 +65,18 @@ TASK_ZOMBIE_REAP  = 7               ;// waiter получил статус, уд
 TASK_SUSPENDED    = 8
 
 CAP_SLOTS    = 16
+
+;// Узел происхождения capability. Дерево хранится отдельно от object refcount:
+;// close освобождает право текущего holder, revoke обходит только потомков.
+CapNode.parent       = 0
+CapNode.first_child  = 8
+CapNode.next_sibling = 16
+CapNode.prev_sibling = 24
+CapNode.owner        = 32           ;// generation-safe task token или 0
+CapNode.slot         = 40           ;// zero-based slot или -1 у ghost node
+CapNode.pinned       = 48           ;// очередь IPC временно запрещает prune
+CapNode.revoked      = 56           ;// queued descendant уже отозван
+CapNode.bytes        = 64
 
 USER.imageMin       = 0x0000000000010000
 USER.imageMax       = 0x0000000040000000
@@ -119,6 +132,156 @@ leaf_function task_from_token
   .invalid:
   xor eax, eax
 end_leaf
+
+;// Создать lineage node и, если задан parent, вставить первым ребёнком.
+;// RDI=parent/0, RSI=owner token/0, RDX=slot/-1. RAX=node/0.
+function cap_node_create
+  push rbx
+  push r12
+  push r13
+  push r14
+  mov r12, rdi
+  mov r13, rsi
+  mov r14, rdx
+  test r12, r12
+  jz .allocate
+  cmp qword [r12+CapNode.revoked], 0
+  jne .failed
+  .allocate:
+  mov edi, CapNode.bytes
+  call kmalloc
+  test rax, rax
+  jz .done
+  mov rbx, rax
+  mov rdi, rax
+  xor eax, eax
+  mov ecx, CapNode.bytes/8
+  rep stosq
+  mov [rbx+CapNode.parent], r12
+  mov [rbx+CapNode.owner], r13
+  mov [rbx+CapNode.slot], r14
+  test r12, r12
+  jz .return_node
+  mov rax, [r12+CapNode.first_child]
+  mov [rbx+CapNode.next_sibling], rax
+  test rax, rax
+  jz .link_head
+  mov [rax+CapNode.prev_sibling], rbx
+  .link_head:
+  mov [r12+CapNode.first_child], rbx
+  .return_node:
+  mov rax, rbx
+  jmp .done
+  .failed:
+  xor eax, eax
+  .done:
+  pop r14
+  pop r13
+  pop r12
+  pop rbx
+endf
+
+;// Удалить ghost node без holder и детей; затем собрать пустых ghost ancestors.
+;// RDI=node/0.
+function cap_node_prune
+  push rbx
+  push r12
+  push r13
+  push r14
+  mov rbx, rdi
+  .node:
+    test rbx, rbx
+    jz .done
+    cmp qword [rbx+CapNode.owner], 0
+    jne .done
+    cmp qword [rbx+CapNode.first_child], 0
+    jne .done
+    cmp qword [rbx+CapNode.pinned], 0
+    jne .done
+    mov r12, [rbx+CapNode.parent]
+    mov r13, [rbx+CapNode.prev_sibling]
+    mov r14, [rbx+CapNode.next_sibling]
+    test r13, r13
+    jz .parent_head
+    mov [r13+CapNode.next_sibling], r14
+    jmp .link_next
+  .parent_head:
+    test r12, r12
+    jz .link_next
+    mov [r12+CapNode.first_child], r14
+  .link_next:
+    test r14, r14
+    jz .free
+    mov [r14+CapNode.prev_sibling], r13
+  .free:
+    mov rdi, rbx
+    call kfree
+    mov rbx, r12
+    jmp .node
+  .done:
+  pop r14
+  pop r13
+  pop r12
+  pop rbx
+endf
+
+;// Отозвать node, holder и всё поддерево. RDI=node. RAX=число закрытых handles.
+function cap_node_revoke_subtree
+  push rbx
+  push r12
+  push r13
+  push r14
+  mov rbx, rdi
+  xor r14d, r14d
+  mov qword [rbx+CapNode.revoked], 1
+  inc qword [rbx+CapNode.pinned]    ;// не дать descendant prune удалить parent
+  mov r12, [rbx+CapNode.first_child]
+  .children:
+    test r12, r12
+    jz .holder
+    mov r13, [r12+CapNode.next_sibling]
+    mov rdi, r12
+    call cap_node_revoke_subtree
+    add r14, rax
+    mov r12, r13
+    jmp .children
+  .holder:
+  mov rdi, [rbx+CapNode.owner]
+  test rdi, rdi
+  jz .prune
+  call task_from_token
+  test rax, rax
+  jz .make_ghost
+  mov r12, rax
+  mov r13, [rbx+CapNode.slot]
+  cmp r13, CAP_SLOTS
+  jae .make_ghost
+  cmp [r12+Task.cap_node+r13*8], rbx
+  jne .make_ghost
+  mov rdi, [r12+Task.cap_type+r13*8]
+  mov rsi, [r12+Task.cap_target+r13*8]
+  mov qword [r12+Task.cap_target+r13*8], 0
+  mov qword [r12+Task.cap_rights+r13*8], 0
+  mov qword [r12+Task.cap_type+r13*8], 0
+  mov qword [r12+Task.cap_node+r13*8], 0
+  mov qword [rbx+CapNode.owner], 0
+  mov qword [rbx+CapNode.slot], -1
+  call capability_release
+  inc r14
+  jmp .prune
+  .make_ghost:
+  mov qword [rbx+CapNode.owner], 0
+  mov qword [rbx+CapNode.slot], -1
+  .prune:
+  dec qword [rbx+CapNode.pinned]
+  mov rdi, rbx
+  call cap_node_prune
+  mov rax, r14
+  pop r14
+  pop r13
+  pop r12
+  pop rbx
+endf
 
 ;// Выделить TCB и свободный slot. RAX=TCB, RDX=token, RCX=slot; либо RAX=0.
 function task_allocate
@@ -304,19 +467,33 @@ endf
 function capability_clear_slot
   push rbx
   push r12
+  push r13
+  sub rsp, 8
   mov rbx, rdi
   mov r12, rsi
   cmp r12, CAP_SLOTS
   jae .done
   mov rsi, [rbx+Task.cap_target+r12*8]
-  test rsi, rsi
-  jz .done
+  mov r13, [rbx+Task.cap_node+r12*8]
   mov rdi, [rbx+Task.cap_type+r12*8]
   mov qword [rbx+Task.cap_target+r12*8], 0
   mov qword [rbx+Task.cap_rights+r12*8], 0
   mov qword [rbx+Task.cap_type+r12*8], 0
+  mov qword [rbx+Task.cap_node+r12*8], 0
+  test r13, r13
+  jz .release
+  mov qword [r13+CapNode.owner], 0
+  mov qword [r13+CapNode.slot], -1
+  .release:
+  test rsi, rsi
+  jz .prune
   call capability_release
+  .prune:
+  mov rdi, r13
+  call cap_node_prune
   .done:
+  add rsp, 8
+  pop r13
   pop r12
   pop rbx
 endf
@@ -338,17 +515,20 @@ function capability_clear_all
   pop rbx
 endf
 
+;// Общая вставка capability. R8=parent lineage node или 0 для нового root.
 ;// RDI=TCB, RSI=type, RDX=object, RCX=rights. RAX=handle или 0.
-;// Успешная вставка создаёт сильную ссылку на heap-object.
-function capability_insert_task
+function capability_insert_task_with_parent
   push rbx
   push r12
   push r13
   push r14
+  push r15
+  sub rsp, 8
   mov rbx, rdi
   mov r12, rsi
   mov r13, rdx
   mov r14, rcx
+  mov r15, r8
   xor eax, eax
   .find:
     cmp qword [rbx+Task.cap_target+rax*8], 0
@@ -359,20 +539,45 @@ function capability_insert_task
   xor eax, eax
   jmp .done
   .found:
-  push rax
+  mov [rsp], rax
+  mov rdi, r15
+  mov rsi, [rbx+Task.token]
+  mov rdx, rax
+  call cap_node_create
+  test rax, rax
+  jz .failed
+  mov r15, rax
   mov rdi, r12
   mov rsi, r13
   call object_retain
-  pop rax
+  mov rax, [rsp]
   mov [rbx+Task.cap_target+rax*8], r13
   mov [rbx+Task.cap_rights+rax*8], r14
   mov [rbx+Task.cap_type+rax*8], r12
+  mov [rbx+Task.cap_node+rax*8], r15
   inc eax
+  jmp .done
+  .failed:
+  xor eax, eax
   .done:
+  add rsp, 8
+  pop r15
   pop r14
   pop r13
   pop r12
   pop rbx
+endf
+
+;// Создать корневую capability без предка.
+function capability_insert_task
+  xor r8d, r8d
+  call capability_insert_task_with_parent
+endf
+
+;// Создать attenuated child capability в lineage tree.
+;// R8=parent node.
+function capability_insert_task_derived
+  call capability_insert_task_with_parent
 endf
 
 ;// RDI=owner slot, остальные аргументы как capability_insert_task.
@@ -503,6 +708,49 @@ function capability_close_current
   pop rbx
 endf
 
+;// Отозвать все capabilities, выведенные из указанного handle. Сам root
+;// остаётся действующим и может снова делегировать право. RDI=handle.
+;// RAX=число отозванных handles либо -9.
+function capability_revoke_current
+  push rbx
+  push r12
+  push r13
+  sub rsp, 8
+  mov rbx, rdi
+  test rbx, rbx
+  jz .bad
+  cmp rbx, CAP_SLOTS
+  ja .bad
+  dec rbx
+  mov edi, [current_task]
+  call task_by_index
+  test rax, rax
+  jz .bad
+  mov r12, [rax+Task.cap_node+rbx*8]
+  test r12, r12
+  jz .bad
+  xor ebx, ebx
+  mov rdi, [r12+CapNode.first_child]
+  .child:
+    test rdi, rdi
+    jz .done
+    mov r13, [rdi+CapNode.next_sibling]
+    call cap_node_revoke_subtree
+    add rbx, rax
+    mov rdi, r13
+    jmp .child
+  .done:
+  mov rax, rbx
+  jmp .return
+  .bad:
+  mov rax, -9
+  .return:
+  add rsp, 8
+  pop r13
+  pop r12
+  pop rbx
+endf
+
 ;// Отделить capability без уменьшения refs. Нужен, когда ownership frame или
 ;// space переходит из handle в mapping/thread. RDI=handle, RSI=expected type.
 ;// RAX=target или 0.
@@ -522,9 +770,18 @@ function capability_take_current
   mov r13, r8
   mov edi, [current_task]
   call task_by_index
+  mov r12, [rax+Task.cap_node+r13*8]
   mov qword [rax+Task.cap_target+r13*8], 0
   mov qword [rax+Task.cap_rights+r13*8], 0
   mov qword [rax+Task.cap_type+r13*8], 0
+  mov qword [rax+Task.cap_node+r13*8], 0
+  test r12, r12
+  jz .taken
+  mov qword [r12+CapNode.owner], 0
+  mov qword [r12+CapNode.slot], -1
+  mov rdi, r12
+  call cap_node_prune
+  .taken:
   mov rax, rbx
   jmp .done
   .failed:
@@ -578,12 +835,13 @@ function capability_clone_current
   jne .failed
   mov rbx, [rax+Task.cap_type+r13*8]
   mov rdx, [rax+Task.cap_target+r13*8]
+  mov r8, [rax+Task.cap_node+r13*8]
   test rdx, rdx
   jz .failed
   mov rdi, r12
   mov rsi, rbx
   mov rcx, r14
-  call capability_insert_task
+  call capability_insert_task_derived
   jmp .done
   .failed:
   xor eax, eax
@@ -644,16 +902,67 @@ function task_remove
   pop rbx
 endf
 
-;// Завершить текущий процесс и немедленно разбудить его waiter.
-;// RDI=exit code. Ресурсы освободит другая задача.
-function task_mark_exit
+;// Убрать задачу из wait-структуры перед внешним kill.
+;// RDI=TCB. Обычный EXIT вызывается из RUNNABLE и проходит этот код как no-op.
+function task_cancel_block
+  push rbx
+  push r12
+  mov rbx, rdi
+  cmp qword [rbx+Task.state], TASK_BLOCKED_IPC
+  je .ipc
+  cmp qword [rbx+Task.state], TASK_BLOCKED_WAIT
+  je .wait
+  cmp qword [rbx+Task.state], TASK_BLOCKED_IRQ
+  je .irq
+  jmp .done
+  .ipc:
+  mov r12, [rbx+Task.wait_endpoint]
+  test r12, r12
+  jz .clear_ipc
+  mov rax, [rbx+Task.token]
+  cmp [r12+Endpoint.waiter], rax
+  jne .release_endpoint
+  mov qword [r12+Endpoint.waiter], 0
+  .release_endpoint:
+  mov edi, CAP_ENDPOINT
+  mov rsi, r12
+  call object_release
+  .clear_ipc:
+  mov qword [rbx+Task.wait_endpoint], 0
+  mov qword [rbx+Task.wait_buffer], 0
+  jmp .done
+  .wait:
+  mov rdi, [rbx+Task.wait_target]
+  test rdi, rdi
+  jz .clear_wait
+  call task_from_token
+  test rax, rax
+  jz .clear_wait
+  mov rdx, [rbx+Task.token]
+  cmp [rax+Task.waiter], rdx
+  jne .clear_wait
+  mov qword [rax+Task.waiter], 0
+  .clear_wait:
+  mov qword [rbx+Task.wait_target], 0
+  mov qword [rbx+Task.wait_cap], 0
+  jmp .done
+  .irq:
+  mov qword [rbx+Task.wait_irq], -1
+  .done:
+  pop r12
+  pop rbx
+endf
+
+;// Завершить произвольную задачу и немедленно разбудить её waiter.
+;// RDI=TCB, RSI=exit code. Ресурсы освободит scheduler на чужом CR3/stack.
+function task_mark_exit_tcb
   push rbx
   push r12
   push r13
-  mov r13, rdi
-  mov edi, [current_task]
-  call task_by_index
-  mov rbx, rax
+  mov rbx, rdi
+  mov r13, rsi
+  mov rdi, rbx
+  call task_cancel_block
   mov [rbx+Task.exit_code], r13
   mov qword [rbx+Task.state], TASK_ZOMBIE
   mov rdi, [rbx+Task.waiter]
@@ -671,15 +980,71 @@ function task_mark_exit
   mov rdx, [r12+Task.saved_rsp]
   mov [rdx+Context.rax], r13
   mov rcx, [r12+Task.wait_cap]
-  mov qword [r12+Task.cap_target+rcx*8], 0
-  mov qword [r12+Task.cap_rights+rcx*8], 0
-  mov qword [r12+Task.cap_type+rcx*8], 0
+  mov rdi, r12
+  mov rsi, rcx
+  call capability_clear_slot
   mov qword [r12+Task.wait_target], 0
   mov qword [r12+Task.state], TASK_RUNNABLE
   mov qword [rbx+Task.waiter], 0
   mov qword [rbx+Task.state], TASK_ZOMBIE_REAP
   .done:
   pop r13
+  pop r12
+  pop rbx
+endf
+
+;// Завершить текущий процесс. RDI=exit code.
+function task_mark_exit
+  push rbx
+  mov rbx, rdi
+  mov edi, [current_task]
+  call task_by_index
+  mov rdi, rax
+  mov rsi, rbx
+  call task_mark_exit_tcb
+  pop rbx
+endf
+
+;// Внешнее завершение по process capability. RDI=handle, RSI=status.
+function task_kill
+  push rbx
+  push r12
+  mov r12, rsi
+  mov esi, CAP_PROCESS
+  mov edx, CAP_CONTROL
+  call capability_lookup
+  test rax, rax
+  jz .bad
+  mov rdi, rax
+  call task_from_token
+  test rax, rax
+  jz .bad
+  mov rbx, rax
+  mov edi, [current_task]
+  call task_by_index
+  cmp rax, rbx
+  je .invalid
+  mov rax, [rbx+Task.state]
+  cmp rax, TASK_ZOMBIE
+  je .busy
+  cmp rax, TASK_REAPABLE
+  je .busy
+  cmp rax, TASK_ZOMBIE_REAP
+  je .busy
+  mov rdi, rbx
+  mov rsi, r12
+  call task_mark_exit_tcb
+  xor eax, eax
+  jmp .done
+  .bad:
+  mov rax, -9
+  jmp .done
+  .busy:
+  mov rax, -16
+  jmp .done
+  .invalid:
+  mov rax, -22
+  .done:
   pop r12
   pop rbx
 endf
@@ -768,9 +1133,9 @@ function task_wait
   mov r14, [rbx+Task.exit_code]
   mov edi, [current_task]
   call task_by_index
-  mov qword [rax+Task.cap_target+r13*8], 0
-  mov qword [rax+Task.cap_rights+r13*8], 0
-  mov qword [rax+Task.cap_type+r13*8], 0
+  mov rdi, rax
+  mov rsi, r13
+  call capability_clear_slot
   mov edi, r12d
   dec edi
   mov rsi, rbx

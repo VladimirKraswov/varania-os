@@ -42,6 +42,10 @@
 | 21 | `THREAD_START` | `process_cap` | `SUSPENDED → RUNNABLE` |
 | 22 | `CAP_CLOSE` | `handle` | закрывает локальную ссылку |
 | 23 | `BOOTFS_INFO` | `bootfs_cap` | `RAX=base`, `RDX=used size` |
+| 24 | `PROCESS_KILL` | `process_cap`, `status` | внешний exit; нужен `CONTROL` |
+| 25 | `SHARED_CREATE` | `system_cap`, `pages` | shared handle, `pages=1..16` |
+| 26 | `SHARED_MAP` | `shared_cap`, `virtual`, `flags` | map в текущий space |
+| 27 | `CAP_REVOKE` | `handle` | число закрытых active descendants |
 
 Основные errno: `-2` no entry, `-9` bad capability, `-11` queue/full slots,
 `-12` no memory, `-14` bad user pointer, `-16` busy, `-22` invalid argument,
@@ -78,6 +82,13 @@ Reply не является скрытым kernel-состоянием. Отпр
 ослабленную `CAP_SEND` на свой reply endpoint. Так устроены протоколы `procd` и
 `nameserver`.
 
+Каждый transfer создаёт descendant исходной capability. Очередь удерживает
+pinned lineage node даже после `CAP_MOVE`; полученный handle становится его
+потомком. Благодаря этому `CAP_REVOKE` видит права, прошедшие через несколько
+процессов и временно находящиеся в очереди.
+Если отозван хотя бы один queued descendant, receive снимает всё сообщение,
+освобождает его object refs и возвращает `-9`, сохраняя атомарность payload.
+
 ## Объекты памяти
 
 `FRAME_ALLOC` создаёт один zero-filled frame размером 4096 байт. Пока frame не
@@ -95,6 +106,13 @@ SPACE_MAP_EXEC  = 2
 кадра leaf PTE и потребляет frame handle; разрушение AddressSpace освобождает
 leaf frames и все уровни page tables снизу вверх. Дублированный frame нельзя
 map-ить (`-16`), потому что его ownership был бы неоднозначен.
+
+`SHARED_CREATE` создаёт от 1 до 16 zero-filled frames и возвращает capability с
+`MAP|READ|WRITE`. `SHARED_MAP` отображает весь объект в текущий managed
+AddressSpace по page-aligned адресу. Разрешены флаги `0` и `SPACE_MAP_WRITE`;
+исполняемое отображение невозможно. Для RW нужны `MAP|READ|WRITE`, для R —
+`MAP|READ`. Один объект можно передать через IPC и отобразить в нескольких
+процессах; mapping удерживает object ref до teardown address space.
 
 ## Создание thread
 
@@ -126,6 +144,15 @@ struct ThreadConfig {           /* 112 bytes */
 Process capability содержит generation-safe token, а не индекс таблицы.
 `WAIT` блокируется до exit, возвращает status, потребляет handle и разрешает
 повторное использование slot с новым generation.
+
+`PROCESS_KILL` требует process capability с `CONTROL`, не потребляет её и
+возвращает `0` после перевода живой чужой задачи в zombie. Self-kill через этот
+API отвергается (`-22`), уже завершившаяся цель даёт `-16`; status затем получает
+обычный `WAIT`. Если цель блокировалась в IPC/WAIT/IRQ, kernel сначала отменяет
+соответствующее ожидание и освобождает удерживаемые ссылки.
+
+`CAP_REVOKE` не закрывает указанный root. Он обходит lineage tree, закрывает
+все активные descendants и возвращает их число. Неверный handle даёт `-9`.
 
 `BRK` работает внутри уже созданного address space: рост добавляет обнулённые
 RW+NX pages, shrink возвращает frames. Page fault непосредственно под

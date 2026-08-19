@@ -79,17 +79,39 @@ start:
   test r13, r13
   jz .bad_request
   cmp r12, keyboard_name.size
-  jne .ordinary_caps
+  jne .shared_policy
   lea rdi, [ipc_request+IpcMessage.words+8]
   lea rsi, [keyboard_name]
   mov edx, keyboard_name.size
   call bytes_equal
   test eax, eax
-  jz .ordinary_caps
+  jz .shared_policy
   mov edx, IRQ1_CAP
   mov ecx, CAP_WAIT
   mov r8d, IO_CAP
   mov r9d, CAP_READ
+  jmp .load_requested
+
+  .shared_policy:
+  ;// Создавать shared objects может только выбранный bootstrap-политикой
+  ;// процесс. Receiver получает уже ослабленную capability через IPC.
+  cmp r12, shm_sender_name.size
+  jne .ordinary_caps
+  lea rdi, [ipc_request+IpcMessage.words+8]
+  lea rsi, [shm_sender_name]
+  mov edx, shm_sender_name.size
+  call bytes_equal
+  test eax, eax
+  jz .ordinary_caps
+  xor edx, edx
+  xor ecx, ecx
+  cmp qword [ipc_request+IpcMessage.cap_count], 2
+  jb .shared_root
+  mov rdx, qword [ipc_request+IpcMessage.caps+IpcCap.bytes+IpcCap.handle]
+  mov rcx, qword [ipc_request+IpcMessage.caps+IpcCap.bytes+IpcCap.rights]
+  .shared_root:
+  mov r8d, ROOT_CAP
+  mov r9d, CAP_CREATE
   jmp .load_requested
 
   .ordinary_caps:
@@ -112,7 +134,7 @@ start:
   mov qword [response+IpcMessage.words], 0
   mov qword [response+IpcMessage.cap_count], 2
   mov qword [response+IpcMessage.caps+IpcCap.handle], rax
-  mov rax, CAP_WAIT+CAP_MOVE
+  mov rax, CAP_WAIT+CAP_CONTROL+CAP_MOVE
   mov qword [response+IpcMessage.caps+IpcCap.rights], rax
   mov qword [response+IpcMessage.caps+IpcCap.bytes+IpcCap.handle], rdx
   mov rax, CAP_SEND+CAP_MOVE
@@ -611,6 +633,8 @@ init_name db "init.elf"
 .size = $-init_name
 keyboard_name db "keyboard.elf"
 .size = $-keyboard_name
+shm_sender_name db "shm_sender.elf"
+.size = $-shm_sender_name
 
 align 8
 bootfs_base dq 0

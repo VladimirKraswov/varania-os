@@ -117,6 +117,7 @@ PAGE.P  = 1        ;// Present - страница в памяти
 PAGE.RW = 2        ;// Read/Write - чтение/запись
 PAGE.US = 4        ;// User - доступна из пользовательского режима
 PAGE.PS = 0x80     ;// Page Size - большая страница (2 MiB)
+PAGE.SHARED = 0x200 ;// software bit: физический кадр принадлежит Shm object
 PAGE.NX = 1 shl 63 ;// No Execute, действует после включения EFER.NXE
 
 ;//// Селекторы сегментов 64-битной GDT. TSS занимает 16 байт.

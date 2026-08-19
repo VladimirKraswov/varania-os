@@ -121,6 +121,55 @@ start:
   jne init_failed
   log lifecycle_ok_text, lifecycle_ok_text.size
 
+  ;// Revoke проверяется отдельным процессом: временные descendants не должны
+  ;// загрязнять capability table init.
+  lea rdi, [revoke_name]
+  mov esi, revoke_name.size
+  xor edx, edx
+  xor ecx, ecx
+  call spawn
+  test rax, rax
+  js init_failed
+  mov r13, rax
+  mov rdi, rdx
+  call close_handle
+  mov rdi, r13
+  call wait_success
+  test rax, rax
+  jnz init_failed
+
+  ;// Supervisor получает только send-only endpoint procd. Capability процесса,
+  ;// которую вернёт procd, уже содержит CONTROL и позволяет выполнить kill.
+  lea rdi, [supervisor_name]
+  mov esi, supervisor_name.size
+  mov edx, PROCD_EP
+  mov ecx, CAP_SEND
+  call spawn
+  test rax, rax
+  js init_failed
+  mov r13, rax
+  mov rdi, rdx
+  call close_handle
+  mov rdi, r13
+  call wait_success
+  test rax, rax
+  jnz init_failed
+
+  ;// Первый shared round прогревает slab-классы. После второго число свободных
+  ;// физических frames обязано совпасть: mappings, address spaces и сам объект
+  ;// действительно освобождены, а не только скрыты закрытыми handles.
+  call run_shared_round
+  test rax, rax
+  jnz init_failed
+  system_call SYS_MEM_INFO
+  mov rbx, rax
+  call run_shared_round
+  test rax, rax
+  jnz init_failed
+  system_call SYS_MEM_INFO
+  cmp rax, rbx
+  jne init_failed
+
   log all_ok_text, all_ok_text.size
 .idle:
   system_call SYS_YIELD
@@ -202,6 +251,49 @@ spawn_lifecycle:
 .done:
   ret
 
+;// Один полный shared-memory lifecycle. Receiver стартует первым и блокируется;
+;// sender получает его endpoint, создаёт две страницы и ждёт подтверждение.
+run_shared_round:
+  push r12
+  push r13
+  push r14
+  push r15
+  sub rsp, 8                       ;// System V alignment перед call
+  lea rdi, [shm_receiver_name]
+  mov esi, shm_receiver_name.size
+  xor edx, edx
+  xor ecx, ecx
+  call spawn
+  test rax, rax
+  js .done
+  mov r13, rax
+  mov r14, rdx
+  lea rdi, [shm_sender_name]
+  mov esi, shm_sender_name.size
+  mov rdx, r14
+  mov ecx, CAP_SEND
+  call spawn
+  test rax, rax
+  js .done
+  mov r15, rax
+  mov rdi, rdx
+  call close_handle
+  mov rdi, r14
+  call close_handle
+  mov rdi, r15
+  call wait_success
+  test rax, rax
+  jnz .done
+  mov rdi, r13
+  call wait_success
+.done:
+  add rsp, 8
+  pop r15
+  pop r14
+  pop r13
+  pop r12
+  ret
+
 wait_success:
   system_call SYS_WAIT
   ret
@@ -254,6 +346,14 @@ keyboard_name db "keyboard.elf"
 .size = $-keyboard_name
 lifecycle_name db "lifecycle_child.elf"
 .size = $-lifecycle_name
+revoke_name db "cap_revoke_test.elf"
+.size = $-revoke_name
+supervisor_name db "supervisor.elf"
+.size = $-supervisor_name
+shm_receiver_name db "shm_receiver.elf"
+.size = $-shm_receiver_name
+shm_sender_name db "shm_sender.elf"
+.size = $-shm_sender_name
 
 align 8
 rpc_message rb IpcMessage.bytes

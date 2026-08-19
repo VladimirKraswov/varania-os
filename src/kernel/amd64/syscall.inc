@@ -25,6 +25,10 @@ SYS_THREAD_CREATE   = 20
 SYS_THREAD_START    = 21
 SYS_CAP_CLOSE       = 22
 SYS_BOOTFS_INFO     = 23
+SYS_PROCESS_KILL    = 24
+SYS_SHARED_CREATE   = 25
+SYS_SHARED_MAP      = 26
+SYS_CAP_REVOKE      = 27
 
 ERR_NOENT = -2
 ERR_BAD_HANDLE = -9
@@ -376,6 +380,190 @@ function syscall_space_map
   pop rbx
 endf
 
+;// Создать shared-memory object из нескольких страниц.
+;// RDI=system cap, RSI=число страниц. RAX=handle/error.
+function syscall_shared_create
+  push rbx
+  push r12
+  mov r12, rsi
+  test r12, r12
+  jz .invalid
+  cmp r12, SHARED_MAX_PAGES
+  ja .invalid
+  call syscall_require_create
+  test rax, rax
+  jz .bad
+  mov rdi, r12
+  call shared_memory_create
+  test rax, rax
+  jz .no_memory
+  mov rbx, rax
+  mov edi, [current_task]
+  call task_by_index
+  mov rdi, rax
+  mov esi, CAP_SHARED
+  mov rdx, rbx
+  mov ecx, CAP_MAP+CAP_READ+CAP_WRITE
+  call capability_insert_task
+  test rax, rax
+  jz .release_failed
+  push rax
+  mov edi, CAP_SHARED
+  mov rsi, rbx
+  call object_release             ;// убрать временную creator reference
+  pop rax
+  jmp .done
+  .release_failed:
+  mov edi, CAP_SHARED
+  mov rsi, rbx
+  call object_release
+  .no_memory:
+  mov rax, ERR_NO_MEMORY
+  jmp .done
+  .bad:
+  mov rax, ERR_BAD_HANDLE
+  jmp .done
+  .invalid:
+  mov rax, ERR_INVALID
+  .done:
+  pop r12
+  pop rbx
+endf
+
+;// Отобразить SharedMemory в текущий процесс. В отличие от FRAME_MAP объект
+;// сохраняет ownership кадров, поэтому одну область можно безопасно передать
+;// другому процессу и отобразить там по иному виртуальному адресу.
+;// RDI=shared cap, RSI=virtual, RDX=SPACE_MAP_WRITE или 0.
+function syscall_shared_map
+  push rbx
+  push r12
+  push r13
+  push r14
+  push r15
+  sub rsp, 8                       ;// [rsp] = SharedMapping*
+  mov r12, rdi
+  mov r13, rsi
+  mov r14, rdx
+  test r13, PAGE_SIZE-1
+  jnz .invalid
+  cmp r13, USER.imageMin
+  jb .invalid
+  cmp r14, SPACE_MAP_WRITE
+  ja .invalid                      ;// shared memory всегда NX
+
+  mov rdi, r12
+  mov esi, CAP_SHARED
+  mov edx, CAP_MAP+CAP_READ
+  test r14, SPACE_MAP_WRITE
+  jz .lookup
+  or edx, CAP_WRITE
+  .lookup:
+  call capability_lookup
+  test rax, rax
+  jz .bad
+  mov r12, rax                     ;// SharedMemory
+
+  mov rax, [r12+SharedMemory.page_count]
+  shl rax, 12
+  add rax, r13
+  jc .invalid
+  mov rdx, USER.limit
+  cmp rax, rdx
+  ja .invalid
+
+  mov edi, [current_task]
+  call task_by_index
+  mov rbx, [rax+Task.space]
+  test rbx, rbx
+  jz .invalid                      ;// только процесс с managed AddressSpace
+
+  ;// Проверяем весь диапазон до изменения таблиц: API либо отображает объект
+  ;// целиком, либо не меняет видимое адресное пространство.
+  xor r15d, r15d
+  .check_page:
+    cmp r15, [r12+SharedMemory.page_count]
+    jae .allocate_record
+    mov rsi, r15
+    shl rsi, 12
+    add rsi, r13
+    mov rdi, [rbx+AddressSpace.cr3]
+    call vmm_translate_user
+    test rax, rax
+    jnz .busy
+    inc r15
+    jmp .check_page
+
+  .allocate_record:
+  mov edi, SharedMapping.bytes
+  call kmalloc
+  test rax, rax
+  jz .no_memory
+  mov [rsp], rax
+  xor r15d, r15d
+  .map_page:
+    cmp r15, [r12+SharedMemory.page_count]
+    jae .mapped
+    mov rsi, r15
+    shl rsi, 12
+    add rsi, r13
+    mov rdi, [rbx+AddressSpace.cr3]
+    mov rdx, [r12+SharedMemory.frames+r15*8]
+    mov rcx, PAGE.US+PAGE.NX+PAGE.SHARED
+    test r14, SPACE_MAP_WRITE
+    jz .map
+    or rcx, PAGE.RW
+    .map:
+    call vmm_map_in_space
+    test rax, rax
+    jz .rollback
+    inc r15
+    jmp .map_page
+
+  .mapped:
+  mov rax, [rsp]
+  mov rcx, [rbx+AddressSpace.shared_head]
+  mov [rax+SharedMapping.next], rcx
+  mov [rax+SharedMapping.shm], r12
+  mov [rbx+AddressSpace.shared_head], rax
+  mov edi, CAP_SHARED
+  mov rsi, r12
+  call object_retain
+  xor eax, eax
+  jmp .done
+
+  .rollback:
+    test r15, r15
+    jz .free_record
+    dec r15
+    mov rsi, r15
+    shl rsi, 12
+    add rsi, r13
+    mov rdi, [rbx+AddressSpace.cr3]
+    call vmm_unmap_in_space         ;// frame по-прежнему принадлежит object
+    jmp .rollback
+  .free_record:
+  mov rdi, [rsp]
+  call kfree
+  .no_memory:
+  mov rax, ERR_NO_MEMORY
+  jmp .done
+  .busy:
+  mov rax, ERR_BUSY
+  jmp .done
+  .bad:
+  mov rax, ERR_BAD_HANDLE
+  jmp .done
+  .invalid:
+  mov rax, ERR_INVALID
+  .done:
+  add rsp, 8
+  pop r15
+  pop r14
+  pop r13
+  pop r12
+  pop rbx
+endf
+
 ;// Создать suspended thread в уже подготовленном address space.
 ;// RDI=system cap, RSI=space cap, RDX=user ThreadConfig*. RAX=process handle.
 function syscall_thread_create
@@ -631,6 +819,14 @@ function syscall_dispatch
   je .cap_close
   cmp rax, SYS_BOOTFS_INFO
   je .bootfs_info
+  cmp rax, SYS_PROCESS_KILL
+  je .process_kill
+  cmp rax, SYS_SHARED_CREATE
+  je .shared_create
+  cmp rax, SYS_SHARED_MAP
+  je .shared_map
+  cmp rax, SYS_CAP_REVOKE
+  je .cap_revoke
   mov qword [r12+Context.rax], ERR_NOSYS
   jmp .resume_current
 
@@ -737,6 +933,34 @@ function syscall_dispatch
   call syscall_bootfs_info
   mov [r12+Context.rax], rax
   mov [r12+Context.rdx], rdx
+  jmp .resume_current
+
+  .process_kill:
+  mov rdi, [r12+Context.rdi]
+  mov rsi, [r12+Context.rsi]
+  call task_kill
+  mov [r12+Context.rax], rax
+  jmp .resume_current
+
+  .shared_create:
+  mov rdi, [r12+Context.rdi]
+  mov rsi, [r12+Context.rsi]
+  call syscall_shared_create
+  mov [r12+Context.rax], rax
+  jmp .resume_current
+
+  .shared_map:
+  mov rdi, [r12+Context.rdi]
+  mov rsi, [r12+Context.rsi]
+  mov rdx, [r12+Context.rdx]
+  call syscall_shared_map
+  mov [r12+Context.rax], rax
+  jmp .resume_current
+
+  .cap_revoke:
+  mov rdi, [r12+Context.rdi]
+  call capability_revoke_current
+  mov [r12+Context.rax], rax
   jmp .resume_current
 
   .io_read8:
