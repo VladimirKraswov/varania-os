@@ -1,0 +1,6 @@
+VLIB01
+name=terminal
+service=2
+abi=1
+transport=ipc-capability
+interface=/system/lib/terminal.inc

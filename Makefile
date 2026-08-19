@@ -22,7 +22,7 @@ USER_PROGRAMS := procd init nameserver service client terminal keyboard nvme vaf
 		 shm_receiver shm_sender
 USER_ELFS := $(addprefix $(USER_BUILD)/,$(addsuffix .elf,$(USER_PROGRAMS)))
 DISK_BUILD := build/disk
-DISK_PROGRAMS := hello
+DISK_PROGRAMS := hello edit sysinfo
 DISK_ELFS := $(addprefix $(DISK_BUILD)/,$(addsuffix .elf,$(DISK_PROGRAMS)))
 FASM_SOURCE_STAMP := build/fasm-source/.stamp
 FASM_GUEST_ELF := $(DISK_BUILD)/fasm.elf
@@ -32,11 +32,11 @@ BOOT_SOURCES := src/boot/boot.asm src/boot/disk.inc \
                 src/kernel/memory/meminfo.inc src/const.inc
 KERNEL_SOURCES := src/kernel/kernel.asm src/const.inc \
                   $(wildcard src/kernel/amd64/*.inc)
-SYSROOT_INPUTS := Makefile README.md $(shell find src docs scripts -type f) \
+SYSROOT_INPUTS := Makefile README.md $(shell find src docs scripts system -type f) \
 	tools/fasm/fasm-1.73.35.tgz tools/vafs/vafs.py
 
 .PHONY: all build check smoke test-capabilities test-isolation test-lifecycle \
-	test-revoke test-supervisor test-shared test-shell test-vafs test run debug clean help
+	test-revoke test-supervisor test-shared test-shell test-editor test-vafs test run debug clean help
 
 all: build
 
@@ -52,7 +52,7 @@ $(USER_BUILD)/%.elf: src/user/%.asm src/user/abi.inc tools/fasm/run.sh
 	mkdir -p $(USER_BUILD)
 	$(FASM_RUNNER) $< $@
 
-$(DISK_BUILD)/%.elf: src/programs/%.asm src/user/abi.inc tools/fasm/run.sh
+$(DISK_BUILD)/%.elf: src/programs/%.asm src/user/abi.inc $(wildcard src/lib/*.inc) tools/fasm/run.sh
 	mkdir -p $(DISK_BUILD)
 	$(FASM_RUNNER) $< $@
 
@@ -79,11 +79,13 @@ $(BOOT_PREFIX): $(BOOT_IMAGE) $(KERNEL_IMAGE) $(INITRAMFS_IMAGE) src/link.asm
 # Sparse image не занимает 1 GiB на APFS/ext4, пока гость не запишет блоки.
 $(DISK_IMAGE): $(BOOT_PREFIX) $(SYSROOT_INPUTS) $(USER_ELFS) $(DISK_ELFS)
 	rm -rf build/sysroot
-	mkdir -p build/sysroot/root/bin build/sysroot/root/system/build/fasm-source build/sysroot/root/system/tools/fasm
+	mkdir -p build/sysroot/root/bin build/sysroot/root/system/build/fasm-source build/sysroot/root/system/tools/fasm build/sysroot/root/system/lib
 	tar -xzf tools/fasm/fasm-1.73.35.tgz -C build/sysroot
 	cp -R src build/sysroot/root/system/src
 	cp -R docs build/sysroot/root/system/docs
 	cp -R scripts build/sysroot/root/system/scripts
+	cp -R system/. build/sysroot/root/system/
+	cp src/lib/*.inc build/sysroot/root/system/lib/
 	cp -R build/user build/sysroot/root/system/build/user
 	cp $(DISK_ELFS) build/sysroot/root/bin/
 	cp src/programs/selfhost_test.asm build/sysroot/root/system/t.asm
@@ -135,10 +137,13 @@ test-shared: check
 test-shell: check
 	python3 tests/test_shell.py
 
+test-editor: check
+	python3 tests/test_editor.py
+
 test-vafs:
 	python3 tests/test_vafs.py
 
-test: test-vafs smoke test-capabilities test-isolation test-lifecycle test-revoke test-supervisor test-shared test-shell
+test: test-vafs smoke test-capabilities test-isolation test-lifecycle test-revoke test-supervisor test-shared test-shell test-editor
 
 run: check
 	$(QEMU_RUNNER)
@@ -163,6 +168,7 @@ help:
 	  'make test-supervisor — проверить внешний kill и restart policy' \
 	  'make test-shared — проверить межпроцессную shared memory и IPC' \
 	  'make test-shell — проверить persistent VaraniaFS/NVMe через shell и VGA' \
+	  'make test-editor — проверить VEdit, libvarania, FASM build/run и подсветку' \
 	  'make test-vafs — проверить COW, CRC32C, B+-tree и recovery VaraniaFS' \
 	  'make debug  — QEMU с журналом прерываний/ошибок' \
 	  'make clean  — удалить только создаваемые сборкой файлы'

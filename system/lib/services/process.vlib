@@ -1,0 +1,6 @@
+VLIB01
+name=process
+service=5
+abi=1
+transport=ipc-capability
+interface=/system/lib/process.inc

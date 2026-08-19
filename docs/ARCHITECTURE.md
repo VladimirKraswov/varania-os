@@ -149,13 +149,20 @@ teardown не освобождает leaf frame. Для shared memory mapping re
 ## Терминал и файловый сервис
 
 Интерактивная цепочка целиком находится в ring 3. Keyboard driver получает
-IRQ1 и порты PS/2, переводит scan code set 1 в ASCII и отправляет `TERM_KEY`.
-Terminal владеет одной VGA MMIO page, cursor, scrolling, echo и line discipline.
-Shell получает готовую строку и общается с `vafs.elf` отдельным FS-протоколом.
+IRQ1 и порты PS/2, переводит scan code set 1 в key/modifier event и отправляет
+`TERM_KEY`. Terminal владеет одной VGA MMIO page, cursor, scrolling, echo,
+line discipline, raw-key и цветным cell API. Shell получает готовую строку,
+VEdit — raw keys, но ни один из них не получает VGA capability. Оба общаются с
+`vafs.elf` отдельным FS-протоколом.
 VFS, в свою очередь, имеет только endpoint NVMe block service и приватные
 shared windows клиентов. Ядро не знает `ls`, path, extent или имя файла.
 Подробный ABI описан в [FILESYSTEM.md](FILESYSTEM.md), on-disk формат — в
 [VAFS.md](VAFS.md).
+
+Nameserver дополнительно согласует ABI version. FASM-модули `/system/lib`
+дают локальные wrappers, а `.vlib` manifest описывает динамически подключаемый
+capability service. Это заменяет небезопасное отображение stateful DLL внутрь
+каждого приложения; подробности — в [LIBRARIES.md](LIBRARIES.md).
 
 ## Дерево происхождения capabilities
 

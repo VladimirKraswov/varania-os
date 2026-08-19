@@ -144,12 +144,15 @@ new data extents
 | `cat` | `FS_LOOKUP` + последовательные `FS_READ` |
 | `write FILE TEXT` | `FS_LOOKUP` + `FS_WRITE` |
 | `append FILE TEXT` | `FS_STAT` + offset `FS_WRITE` |
+| `edit FILE` | `/bin/edit.elf`, путь относительно текущего каталога |
 | `run FILE [ARGS]` | `FS_READ` + shared cap → process service |
 | `pwd`, `clear`, `help` | локально/terminal IPC |
 
-Line discipline принимает до 47 ASCII-байт. UTF-8 уже допустим на диске и в
-host CLI, но полноценный Unicode input/rendering появится вместе с GOP/font
-service.
+Shell line discipline принимает до 47 ASCII-байт. Запускаемый процесс получает
+command line через shared argument area до 1024 байт, поэтому построенный shell
+абсолютный путь редактора не ограничивается payload procd. UTF-8 допустим на
+диске и в host CLI, но полноценный Unicode input/rendering появится вместе с
+GOP/font service.
 
 ## Проверка
 
@@ -164,3 +167,6 @@ streaming writes (`hel` + `lo`) и останавливает VM. После о�
 
 Так тест покрывает всю цепочку keyboard → shell → VFS → NVMe → image, а не
 только debug marker отдельного процесса.
+
+`tests/test_editor.py` отдельно создаёт source через VEdit, сохраняет его,
+собирает FASM, запускает output и после остановки проверяет оба файла и CRC32C.

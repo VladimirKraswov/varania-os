@@ -15,8 +15,17 @@ DISK = ROOT / "VOS.VHD"
 FASM_ARCHIVE = ROOT / "tools" / "fasm" / "fasm-1.73.35.tgz"
 DISK_ELFS = {
     "hello.elf": ROOT / "build" / "disk" / "hello.elf",
+    "edit.elf": ROOT / "build" / "disk" / "edit.elf",
+    "sysinfo.elf": ROOT / "build" / "disk" / "sysinfo.elf",
     "fasm.elf": ROOT / "build" / "disk" / "fasm.elf",
 }
+SYSTEM_LIBRARY_FILES = (
+    ROOT / "build/sysroot/root/system/lib/runtime.inc",
+    ROOT / "build/sysroot/root/system/lib/services/terminal.vlib",
+    ROOT / "build/sysroot/root/system/lib/services/filesystem.vlib",
+    ROOT / "build/sysroot/root/system/lib/services/process.vlib",
+    ROOT / "build/sysroot/root/system/templates/minimal.asm",
+)
 FASM_SHA256 = "a34dec7d0bc2dc79faabb68bd8bc2f62b6cfb31d69c01449367ce4cd8098934e"
 INITRAMFS_SIZE = 192 * 1024
 DISK_SIZE = 1 * 1024 * 1024 * 1024
@@ -163,6 +172,9 @@ def main() -> None:
         check_elf(name, image)
         if len(image) > 256 * 1024:
             fail(f"{name}: ELF не помещается в текущее shared loader window")
+    missing_system_files = [str(path) for path in SYSTEM_LIBRARY_FILES if not path.is_file()]
+    if missing_system_files:
+        fail(f"в sysroot отсутствуют системные библиотеки: {missing_system_files}")
     prefix = boot + kernel + initramfs
     with DISK.open("rb") as disk_file:
         if disk_file.read(len(prefix)) != prefix:
@@ -186,6 +198,7 @@ def main() -> None:
     print("  VaraniaFS: offset 4 MiB, format v1")
     print("  ELF:       bootstrap и disk ET_EXEC/x86-64, PT_LOAD, W^X подтверждены")
     print("  FASM:      archive SHA-256 и guest platform ELF подтверждены")
+    print("  system:    VEdit, sysinfo, libvarania, .vlib manifests и template на месте")
 
 
 if __name__ == "__main__":

@@ -251,12 +251,16 @@ start:
   cmp r15, DISK_IMAGE_MAX
   ja .bad_request
   mov r14, qword [ipc_request+IpcMessage.caps+IpcCap.bytes+IpcCap.handle]
+  mov rax, PROCD_ARGS_SHARED
+  cmp qword [ipc_request+IpcMessage.words+16], rax
+  je .map_image
   lea rdi, [ipc_request+IpcMessage.words+16]
   call bounded_command_length
   test rax, rax
   jz .bad_request
   lea rax, [ipc_request+IpcMessage.words+16]
   mov [load_command], rax
+.map_image:
   mov eax, SYS_SHARED_MAP
   mov rdi, r14
   mov rsi, DISK_IMAGE_VA
@@ -264,6 +268,30 @@ start:
   syscall
   test rax, rax
   js .image_error
+  mov rax, PROCD_ARGS_SHARED
+  cmp qword [ipc_request+IpcMessage.words+16], rax
+  jne .image_command_ready
+  ;// Длинные argv размещаются после ELF в том же read-only для procd окне.
+  ;// Клиент сообщает точный диапазон с завершающим NUL; область самого ELF
+  ;// использовать под аргументы нельзя.
+  mov rax, qword [ipc_request+IpcMessage.words+24]
+  mov rcx, qword [ipc_request+IpcMessage.words+32]
+  test rcx, rcx
+  jz .bad_mapped_request
+  cmp rcx, 1024
+  ja .bad_mapped_request
+  cmp rax, r15
+  jb .bad_mapped_request
+  mov rdx, rax
+  add rdx, rcx
+  jc .bad_mapped_request
+  cmp rdx, DISK_IMAGE_MAX
+  ja .bad_mapped_request
+  cmp byte [DISK_IMAGE_VA+rdx-1], 0
+  jne .bad_mapped_request
+  add rax, DISK_IMAGE_VA
+  mov [load_command], rax
+.image_command_ready:
   mov rdi, DISK_IMAGE_VA
   mov rsi, r15
   mov rdx, [nameserver_cap]
@@ -285,6 +313,10 @@ start:
   mov rax, r14
   mov rdx, r15
   jmp .loaded
+.bad_mapped_request:
+  mov r14, -22
+  xor r15d, r15d
+  jmp .image_loaded
   .image_error:
   push rax
   cmp rax, -9
@@ -891,8 +923,10 @@ load_program:
 ;// Построить минимальный System V process stack для программ с argc/argv.
 ;// Командная строка разделяется по пробелам без shell quoting — это осознанный
 ;// первый ABI: пути VaraniaFS пока не содержат пробелов. RAX=initial RSP/error.
-STACK_ARG_TABLE = 0xE00
-STACK_STRING_AREA = 0xF00
+;// Нижний KiB страницы отдан строкам расширенного shared argv; таблица
+;// argc/argv лежит перед ним и не пересекается даже при восьми аргументах.
+STACK_ARG_TABLE = 0xB00
+STACK_STRING_AREA = 0xC00
 STACK_MAX_ARGS = 8
 build_initial_stack:
   push rbx

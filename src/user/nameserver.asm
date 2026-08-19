@@ -3,7 +3,9 @@ entry start
 include "abi.inc"
 
 ;// Минимальный user-space nameserver. Он ничего не знает о процессах: хранит
-;// только ослабленную SEND-capability зарегистрированного endpoint.
+;// только ослабленную SEND-capability и версию ABI сервиса. Эта пара является
+;// микроядерным аналогом динамической библиотеки: клиент подключает контракт
+;// во время исполнения, но исполняемый код и состояние остаются изолированы.
 
 SELF_EP = 1
 SERVICE_MAX = 8
@@ -35,6 +37,12 @@ start:
   call close_handle
   mov rax, qword [message+IpcMessage.caps+IpcCap.handle]
   mov [service_endpoints+rbx*8], rax
+  mov rax, qword [message+IpcMessage.words+16]
+  test rax, rax
+  jnz .store_version
+  mov eax, 1                     ;// старые сервисы автоматически получают ABI 1
+.store_version:
+  mov [service_versions+rbx*8], rax
   log registered_text, registered_text.size
   jmp .clear_without_received_caps
 
@@ -55,10 +63,19 @@ start:
   mov rax, [service_endpoints+rbx*8]
   test rax, rax
   jz .missing
+  mov rdx, [service_versions+rbx*8]
+  mov rcx, qword [message+IpcMessage.words+16] ;// минимальная версия клиента
+  cmp rdx, rcx
+  jb .incompatible
   mov qword [reply+IpcMessage.words], 0
+  mov qword [reply+IpcMessage.words+8], rdx
   mov qword [reply+IpcMessage.cap_count], 1
   mov qword [reply+IpcMessage.caps+IpcCap.handle], rax
   mov qword [reply+IpcMessage.caps+IpcCap.rights], CAP_SEND
+  jmp .reply
+.incompatible:
+  mov qword [reply+IpcMessage.words], -93 ;// EPROTONOSUPPORT
+  mov qword [reply+IpcMessage.words+8], rdx
   jmp .reply
 .missing:
   mov qword [reply+IpcMessage.words], -2
@@ -114,5 +131,6 @@ failed_text db "nameserver: IPC error", 10
 .size = $-failed_text
 align 8
 service_endpoints dq SERVICE_MAX dup(0)
+service_versions dq SERVICE_MAX dup(0)
 message rb IpcMessage.bytes
 reply rb IpcMessage.bytes

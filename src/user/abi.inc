@@ -80,6 +80,10 @@ USER_STACK_LIMIT = USER_STACK_TOP-16*PAGE_SIZE
 PROCD_SPAWN       = 1            ;// ELF из bootstrap initramfs по имени
 PROCD_SPAWN_IMAGE = 2            ;// ELF в переданном shared-memory объекте
 PROCD_CONFIGURE   = 3            ;// одноразовый bootstrap: endpoint nameserver
+;// Расширенная командная строка лежит после ELF в том же shared window.
+;// words[3]=offset, words[4]=bytes including NUL. Это снимает старый лимит
+;// 47 байт, не добавляя третью capability в IPC-сообщение.
+PROCD_ARGS_SHARED = 0x5652414E49414152
 NAMESERVER_REGISTER = 1
 NAMESERVER_LOOKUP   = 2
 
@@ -99,6 +103,35 @@ TERM_WRITE    = 1
 TERM_KEY      = 2
 TERM_READLINE = 3
 TERM_CLEAR    = 4
+TERM_READKEY  = 5
+TERM_DRAW     = 6
+
+;// Значение TERM_KEY/TERM_READKEY: младшие 32 бита — Unicode/служебный key,
+;// старшие биты — независимые модификаторы. Пока раскладка ASCII, но формат
+;// не придётся менять при появлении полноценного input method.
+KEY_UP       = 0x100
+KEY_DOWN     = 0x101
+KEY_LEFT     = 0x102
+KEY_RIGHT    = 0x103
+KEY_HOME     = 0x104
+KEY_END      = 0x105
+KEY_DELETE   = 0x106
+KEY_PAGE_UP  = 0x107
+KEY_PAGE_DOWN = 0x108
+KEY_INSERT   = 0x109
+KEY_F1       = 0x201
+KEY_F2       = 0x202
+KEY_F3       = 0x203
+KEY_F4       = 0x204
+KEY_F5       = 0x205
+KEY_F6       = 0x206
+KEY_F7       = 0x207
+KEY_F8       = 0x208
+KEY_F9       = 0x209
+KEY_F10      = 0x20A
+KEY_MOD_SHIFT = 1 shl 32
+KEY_MOD_CTRL  = 1 shl 33
+KEY_MOD_ALT   = 1 shl 34
 
 FS_LIST   = 1
 FS_LOOKUP = 2

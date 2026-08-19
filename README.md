@@ -28,7 +28,9 @@ Varania OS показывает устройство 64-битной capability-
 - offset/append streaming write с COW-публикацией и CRC32C по страницам;
 - загрузка ELF64 прямо из VaraniaFS через shared capability и `procd`;
 - официальный FASM 1.73.35 с Varania platform layer: VFS, terminal, heap, exit;
-- shell: `ls`, `cd`, `mkdir`, `touch`, `cat`, `write`, `append`, `run`,
+- `libvarania`: строки/IPC/VFS/terminal/process и versioned `.vlib` services;
+- полноэкранный VEdit: создание/правка, FASM-подсветка, debug, build/run/template;
+- shell: `ls`, `cd`, `mkdir`, `touch`, `cat`, `write`, `append`, `edit`, `run`,
   `pwd`, `clear`, `help`;
 - host-утилита VaraniaFS для macOS/Linux: format/import/get/put/rm/fsck;
 - тесты изоляции памяти, lifecycle, IPC, revoke, supervisor, shared memory,
@@ -105,6 +107,15 @@ varania:/system/build$ run t.elf
 
 Последняя команда запускает ELF, только что созданный внутри Varania OS.
 
+Редактор создаёт файл, вставляет шаблон и сам вызывает системный FASM:
+
+```text
+varania:/$ edit /system/build/hello.asm
+```
+
+В VEdit: `F7` — шаблон, `Ctrl+S` — сохранить, `F5` — собрать, `F6` —
+запустить, `F2` — diagnostic debug mode, `Ctrl+Q` — выйти.
+
 В формате намеренно нет UID/GID/mode/ACL и аналога `sudo`. Доступ задаётся
 endpoint capability процесса, а не POSIX-моделью прав.
 
@@ -134,6 +145,7 @@ python3 tools/vafs/vafs.py fsck VARANIA.VAFS --data
 | `make check` | boot layout, ELF W^X, FASM hash и VaraniaFS fsck |
 | `make smoke` | boot, процессы, IPC, IRQ1 и NVMe DMA read/write/flush |
 | `make test-shell` | keyboard → terminal → VFS → NVMe и remount/fsck |
+| `make test-editor` | VEdit → libvarania → FASM build/run и цветной VGA |
 | `make test-vafs` | COW, CRC32C, B+tree, torn-super recovery и raw offset |
 | `make test` | все structural и QEMU-тесты |
 | `make run` | интерактивная VM |
@@ -153,8 +165,11 @@ src/user/vafs.asm               persistent COW filesystem server
 src/user/terminal.asm           VGA terminal и line discipline
 src/user/keyboard.asm           PS/2 compatibility input driver
 src/user/shell.asm              файловая командная оболочка
+src/lib/                        системная библиотека и клиенты .vlib ABI
 src/fasm/                       platform layer официального FASM 1.73.35
-src/programs/                   программы, живущие только на VaraniaFS
+src/programs/edit.asm           полноэкранный системный редактор
+src/programs/sysinfo.asm        короткий пример приложения libvarania
+system/                         manifests библиотек и шаблоны системного тома
 tools/vafs/vafs.py              macOS/Linux VaraniaFS CLI
 tests/                          structural, recovery и QEMU end-to-end tests
 ```
@@ -168,6 +183,8 @@ tests/                          structural, recovery и QEMU end-to-end tests
 - [ABI системных вызовов](docs/SYSCALLS.md)
 - [User-space ELF loader](docs/USERSPACE.md)
 - [FASM и граница self-hosting](docs/FASM.md)
+- [Системная библиотека и аналог DLL](docs/LIBRARIES.md)
+- [VEdit: управление, подсветка и build/run](docs/EDITOR.md)
 - [Сборка и тесты](docs/DEVELOPMENT.md)
 - [Драйверы в ring 3](docs/DRIVERS.md)
 
@@ -182,7 +199,8 @@ tests/                          structural, recovery и QEMU end-to-end tests
 - FASM 1.73.35 уже собирает и запускает программы внутри системы, но оркестратор
   полной пересборки boot/kernel/initramfs и атомарной установки нового образа
   ещё предстоит перенести с host Makefile;
-- только статические ELF64 `ET_EXEC`, без PIE/dynamic linker;
+- только статические ELF64 `ET_EXEC`, без PIE/ELF dynamic linker; динамическая
+  функциональность уже подключается через versioned `.vlib` capability services;
 - один user thread на процесс, максимум 16 активных TCB.
 
 Эти пункты — следующий план работ, а не скрытые обещания готовой production-ОС.

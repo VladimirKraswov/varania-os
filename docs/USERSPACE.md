@@ -125,11 +125,29 @@ cap[0] = reply endpoint
 cap[1] = shared image с MAP|READ
 ```
 
+Для системных tools и абсолютных путей используется расширенная форма без
+третьей capability:
+
+```text
+words[2] = PROCD_ARGS_SHARED magic
+words[3] = offset командной строки после ELF
+words[4] = размер вместе с NUL, 1..1024
+cap[1]   = то же shared window с ELF и argv
+```
+
+Procd сначала отображает окно read-only, проверяет `offset >= image_size`,
+границы 256 KiB и завершающий NUL. Legacy inline-форма остаётся совместимой.
+
 Procd отображает все 64 страницы окна read-only, применяет тот же строгий ELF
 validator, создаёт процесс и вызывает `SHARED_UNMAP`. Командная строка
 превращается в минимальный System V `argc/argv` stack (до восьми аргументов,
 пока без quoting). Disk process получает собственный endpoint как handle 1 и
 nameserver как handle 2.
+
+Nameserver хранит ABI version рядом с endpoint. `REGISTER.words[2]=0` означает
+совместимую версию 1; `LOOKUP.words[2]` задаёт минимум клиента, а фактическая
+версия возвращается в `reply.words[1]`. Этот механизм лежит в основе `.vlib`
+capability libraries, описанных в [LIBRARIES.md](LIBRARIES.md).
 
 Особые grants задаёт bootstrap policy procd, а не запрашивающий процесс:
 keyboard получает nameserver/IRQ/I/O, terminal — nameserver/VGA MMIO,

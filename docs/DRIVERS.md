@@ -29,14 +29,16 @@ IRQ capability имеет уникальную move-семантику при `T
 успешного commit handle удаляется у procd, а IRQ router указывает на token
 драйвера. I/O capability копируется с attenuation.
 
-Driver ждёт IRQ1, читает scan code из `0x60`, игнорирует release/non-character
-события и переводит set 1 в простой lowercase ASCII. Endpoint terminal он
+Driver ждёт IRQ1, читает scan code из `0x60`, ведёт состояния Shift/Ctrl/Alt,
+CapsLock и префикса `E0`, переводит set 1 в ASCII либо служебный key code.
+Endpoint terminal он
 получает через nameserver и отправляет `TERM_KEY`. Таким образом keyboard не
 может рисовать на экране, а terminal не может читать PS/2 ports.
 
-Текущая таблица намеренно мала: цифры, латинские строчные буквы, основные
-знаки, Space, Enter и Backspace. Shift/Ctrl/Alt, compose, Unicode и несколько
-layouts должны появиться отдельным input service слоем.
+Текущая US-таблица включает оба регистра, знаки, стрелки, Home/End,
+PageUp/PageDown, Delete/Insert и F1..F10. Событие хранит key в младших 32 битах,
+а модификаторы — в старших. Compose, Unicode и несколько layouts должны
+появиться отдельным input service слоем.
 
 ## VGA terminal driver
 
@@ -54,15 +56,18 @@ address. Mapping помечен `PAGE.BORROWED`: при завершении ter
 освобождаются, но device memory не возвращается PMM.
 
 Terminal реализует 80×25 cells, scrolling, cursor в памяти, очистку, echo,
-backspace и сбор одной строки. Hardware VGA cursor ports пока не нужны. После
+backspace, `READLINE`, raw `READKEY` и проверенный абсолютный `DRAW` до 24
+цветных cells за IPC. VEdit использует raw/draw, но VGA capability не получает.
+Hardware VGA cursor ports пока не нужны. После
 старта `SYS_LOG` остаётся только debugcon-интерфейсом: kernel diagnostics не
 портят пользовательский экран.
 
 ```mermaid
 flowchart LR
     P["PS/2 ports + IRQ1"] --> K["keyboard.elf"]
-    K -->|"ASCII / TERM_KEY"| T["terminal.elf"]
+    K -->|"key + modifiers / TERM_KEY"| T["terminal.elf"]
     S["shell.elf"] -->|"WRITE / READLINE / CLEAR"| T
+    E["edit.elf"] -->|"READKEY / DRAW"| T
     T -->|"MMIO mapping"| V["VGA text page"]
 ```
 

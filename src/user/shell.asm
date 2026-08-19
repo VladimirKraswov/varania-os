@@ -104,6 +104,11 @@ start:
   test eax, eax
   jnz .append
   lea rdi, [line_buffer]
+  lea rsi, [prefix_edit]
+  call starts_with
+  test eax, eax
+  jnz .edit
+  lea rdi, [line_buffer]
   lea rsi, [prefix_run]
   call starts_with
   test eax, eax
@@ -156,6 +161,10 @@ start:
   lea rsi, [line_buffer+7]
   xor edi, edi
   call command_write
+  jmp .prompt
+.edit:
+  lea rsi, [line_buffer+5]
+  call command_edit
   jmp .prompt
 .run:
   lea rsi, [line_buffer+4]
@@ -587,24 +596,42 @@ command_run:
   cmp qword [ipc_reply+IpcMessage.words+8], r12
   jne .error
 
+  ;// Командная строка размещается после ELF в том же shared window. Это
+  ;// оставляет IPC control-plane компактным и позволяет библиотечным tools
+  ;// передавать абсолютные пути существенно длиннее прежних 47 байт.
+  xor r14d, r14d
+.measure_command:
+  cmp r14, 1023
+  jae .error
+  cmp byte [r15+r14], 0
+  je .command_measured
+  inc r14
+  jmp .measure_command
+.command_measured:
+  inc r14                       ;// включая NUL
+  mov rbx, r12
+  add rbx, 15
+  and rbx, -16
+  mov rax, rbx
+  add rax, r14
+  jc .too_large
+  cmp rax, [filesystem_buffer_size]
+  ja .too_large
+  lea rdi, [FS_BUFFER_VA+rbx]
+  mov rsi, r15
+  mov rcx, r14
+  rep movsb
+
   lea rdi, [ipc_message]
   mov ecx, IpcMessage.bytes
   xor eax, eax
   rep stosb
   mov qword [ipc_message+IpcMessage.words], PROCD_SPAWN_IMAGE
   mov qword [ipc_message+IpcMessage.words+8], r12
-  lea rdi, [ipc_message+IpcMessage.words+16]
-  mov rsi, r15
-  mov ecx, 48
-.copy_command:
-  lodsb
-  stosb
-  test al, al
-  jz .command_ready
-  dec ecx
-  jnz .copy_command
-  jmp .error
-.command_ready:
+  mov rax, PROCD_ARGS_SHARED
+  mov qword [ipc_message+IpcMessage.words+16], rax
+  mov qword [ipc_message+IpcMessage.words+24], rbx
+  mov qword [ipc_message+IpcMessage.words+32], r14
   mov qword [ipc_message+IpcMessage.cap_count], 2
   mov qword [ipc_message+IpcMessage.caps+IpcCap.handle], SELF_EP
   mov qword [ipc_message+IpcMessage.caps+IpcCap.rights], CAP_SEND
@@ -648,6 +675,72 @@ command_run:
 .done:
   pop r15
   pop r14
+  pop r13
+  pop r12
+  pop rbx
+  ret
+
+;// RSI=путь. Системный editor всегда ищется в /bin, а относительный путь
+;// превращается в абсолютный относительно текущего каталога shell.
+command_edit:
+  push rbx
+  push r12
+  push r13
+  mov r12, rsi
+  lea rdi, [edit_command]
+  lea rsi, [edit_argv0]
+  mov ecx, edit_argv0.size
+  rep movsb
+  mov r13d, edit_argv0.size
+  cmp byte [r12], '/'
+  je .copy_argument
+  lea rsi, [current_path]
+.copy_cwd:
+  mov al, [rsi]
+  test al, al
+  jz .cwd_ready
+  cmp r13, 250
+  jae .error
+  mov [edit_command+r13], al
+  inc r13
+  inc rsi
+  jmp .copy_cwd
+.cwd_ready:
+  cmp r13, edit_argv0.size+1      ;// root уже заканчивается '/'
+  je .copy_argument
+  mov byte [edit_command+r13], '/'
+  inc r13
+.copy_argument:
+  mov al, [r12]
+  cmp r13, 255
+  jae .error
+  mov [edit_command+r13], al
+  inc r13
+  inc r12
+  test al, al
+  jnz .copy_argument
+
+  mov rbx, [current_node]
+  mov qword [current_node], 0
+  mov edi, FS_LOOKUP
+  lea rsi, [bin_name]
+  call fs_named_request
+  test rax, rax
+  jnz .restore_error
+  cmp qword [ipc_reply+IpcMessage.words+16], FS_NODE_DIR
+  jne .restore_error
+  mov rax, qword [ipc_reply+IpcMessage.words+8]
+  mov [current_node], rax
+  lea rsi, [edit_command]
+  call command_run
+  mov [current_node], rbx
+  jmp .done
+.restore_error:
+  mov [current_node], rbx
+.error:
+  lea rdi, [run_error_text]
+  call print_z
+.done:
   pop r13
   pop r12
   pop rbx
@@ -937,7 +1030,7 @@ failed_text db "shell: fatal service or IPC error", 10
 shell_ready db "Shell is ready. Type 'help' for commands.", 10, 10, 0
 prompt_prefix db "varania:", 0
 prompt_suffix db "$ ", 0
-help_text db "Commands: ls, cd, mkdir, touch, cat, write, append, run, pwd, clear, help", 10, 0
+help_text db "Commands: ls, cd, mkdir, touch, cat, write, append, edit, run, pwd, clear, help", 10, 0
 unknown_text db "Unknown command. Type 'help'.", 10, 0
 fs_error_text db "Filesystem operation failed.", 10, 0
 not_dir_text db "cd: target is not a directory.", 10, 0
@@ -961,7 +1054,11 @@ prefix_touch db "touch ", 0
 prefix_cat db "cat ", 0
 prefix_write db "write ", 0
 prefix_append db "append ", 0
+prefix_edit db "edit ", 0
 prefix_run db "run ", 0
+edit_argv0 db "edit.elf ", 0
+.size = $-edit_argv0-1
+bin_name db "bin", 0
 
 align 8
 terminal_endpoint dq 0
@@ -974,5 +1071,6 @@ path_length dq 1
 current_path db '/', 0
 times PATH_CAP-2 db 0
 line_buffer rb 48
+edit_command rb 256
 ipc_message rb IpcMessage.bytes
 ipc_reply rb IpcMessage.bytes

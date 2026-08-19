@@ -54,6 +54,10 @@ start:
   je .readline
   cmp rax, TERM_CLEAR
   je .clear
+  cmp rax, TERM_READKEY
+  je .readkey
+  cmp rax, TERM_DRAW
+  je .draw
   call close_received_caps
   jmp .serve
 
@@ -68,8 +72,8 @@ start:
 
 .key:
   call close_received_caps
-  mov dil, byte [message+IpcMessage.words+8]
-  call line_key
+  mov rdi, qword [message+IpcMessage.words+8]
+  call dispatch_key
   jmp .serve
 
 .readline:
@@ -81,6 +85,7 @@ start:
   call close_handle
   mov rax, qword [message+IpcMessage.caps+IpcCap.handle]
   mov [pending_reply], rax
+  mov qword [pending_mode], 1
   mov qword [line_length], 0
   jmp .serve
 
@@ -93,16 +98,62 @@ start:
   call console_clear
   jmp .serve
 
+.readkey:
+  cmp qword [message+IpcMessage.cap_count], 1
+  jne .bad_readline
+  test qword [message+IpcMessage.caps+IpcCap.rights], CAP_SEND
+  jz .bad_readline
+  mov rdi, [pending_reply]
+  call close_handle
+  mov rax, qword [message+IpcMessage.caps+IpcCap.handle]
+  mov [pending_reply], rax
+  mov qword [pending_mode], 2
+  jmp .serve
+
+;// Абсолютный вывод уже подготовленных VGA cells. В words[1] упакованы
+;// x:y:count (по 8 бит), words[2..7] содержат до 24 пар character/attribute.
+;// Terminal проверяет границы и остаётся единственным владельцем VGA MMIO.
+.draw:
+  call close_received_caps
+  mov rax, qword [message+IpcMessage.words+8]
+  movzx ebx, al                   ;// x
+  shr rax, 8
+  movzx ecx, al                   ;// y
+  shr rax, 8
+  movzx edx, al                   ;// cells
+  cmp ebx, VGA_WIDTH
+  jae .serve
+  cmp ecx, VGA_HEIGHT
+  jae .serve
+  test edx, edx
+  jz .serve
+  cmp edx, 24
+  ja .serve
+  mov eax, ebx
+  add eax, edx
+  cmp eax, VGA_WIDTH
+  ja .serve
+  imul ecx, VGA_WIDTH
+  add ecx, ebx
+  lea rdi, [VGA_BASE+rcx*2]
+  lea rsi, [message+IpcMessage.words+16]
+  mov ecx, edx
+  rep movsw
+  jmp .serve
+
 .failed:
   log failed_text, failed_text.size
   exit_process 1
 
-;// DIL=ASCII. Terminal хранит одну ожидающую READLINE capability.
-line_key:
+;// RDI=key event. Raw-клиент получает событие целиком; line discipline
+;// использует младший ASCII-байт и тем самым остаётся совместимым с shell.
+dispatch_key:
   push rbx
-  mov bl, dil
   cmp qword [pending_reply], 0
   je .done
+  cmp qword [pending_mode], 2
+  je .raw
+  mov bl, dil
   cmp bl, 10
   je .enter
   cmp bl, 13
@@ -120,6 +171,24 @@ line_key:
   inc qword [line_length]
   mov dil, bl
   call console_put
+  jmp .done
+
+.raw:
+  mov rbx, rdi
+  lea rdi, [reply]
+  mov ecx, IpcMessage.bytes
+  xor eax, eax
+  rep stosb
+  mov qword [reply+IpcMessage.words], 0
+  mov qword [reply+IpcMessage.words+8], rbx
+  mov eax, SYS_IPC_SEND
+  mov rdi, [pending_reply]
+  lea rsi, [reply]
+  syscall
+  mov rdi, [pending_reply]
+  call close_handle
+  mov qword [pending_reply], 0
+  mov qword [pending_mode], 0
   jmp .done
 
 .backspace:
@@ -152,6 +221,7 @@ line_key:
   mov rdi, [pending_reply]
   call close_handle
   mov qword [pending_reply], 0
+  mov qword [pending_mode], 0
   mov qword [line_length], 0
   lea rdi, [line_buffer]
   mov ecx, LINE_MAX+1
@@ -282,6 +352,7 @@ align 8
 cursor_x dq 0
 cursor_y dq 0
 pending_reply dq 0
+pending_mode dq 0               ;// 1=READLINE, 2=READKEY
 line_length dq 0
 ;// LINE_MAX и storage обязаны меняться вместе: payload IPC даёт 47 байт плюс NUL.
 line_buffer rb LINE_MAX+1

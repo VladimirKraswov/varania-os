@@ -88,6 +88,10 @@ Reply не является скрытым kernel-состоянием. Отпр
 ослабленную `CAP_SEND` на свой reply endpoint. Так устроены протоколы `procd` и
 `nameserver`.
 
+Nameserver использует обычный IPC и хранит рядом с endpoint версию публичного
+ABI. `vlib_open(service, minimum_version)` получает capability только при
+совместимой версии; kernel отдельного понятия DLL или global symbol не имеет.
+
 Каждый transfer создаёт descendant исходной capability. Очередь удерживает
 pinned lineage node даже после `CAP_MOVE`; полученный handle становится его
 потомком. Благодаря этому `CAP_REVOKE` видит права, прошедшие через несколько

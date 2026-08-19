@@ -56,7 +56,9 @@ make clean && make test
 13. VaraniaFS COW/recovery/CRC32C на host и через ring-3 server;
 14. disk-only ELF через VFS shared capability и повторный `SHARED_UNMAP`;
 15. FASM внутри VM: source read, streaming output, запуск созданного ELF;
-16. PS/2 → terminal → shell → VFS → NVMe, VGA и remount после записи.
+16. PS/2 → terminal → shell → VFS → NVMe, VGA и remount после записи;
+17. VEdit: raw keys, цветная подсветка, debug, streaming save, FASM build/run;
+18. version negotiation `.vlib` через nameserver и libvarania wrappers.
 
 Тесты можно запускать отдельно:
 
@@ -69,6 +71,7 @@ make test-revoke
 make test-supervisor
 make test-shared
 make test-shell
+make test-editor
 ```
 
 TCG одинаково работает на Mac ARM и Linux и не требует KVM/HVF. Каждый
@@ -82,7 +85,7 @@ make run
 
 После self-tests пользовательский terminal очищает VGA, печатает приветствие и
 shell показывает `varania:/$`. Команда `ls` читает с NVMe каталог `system/`;
-доступны `cd`, `mkdir`, `touch`, `cat`, `write`, `append`, `run`, `pwd`,
+доступны `cd`, `mkdir`, `touch`, `cat`, `write`, `append`, `edit`, `run`, `pwd`,
 `clear`, `help`.
 
 На macOS Cocoa display запускается полноэкранно с `zoom-to-fit`, чтобы VGA
@@ -119,6 +122,8 @@ make debug
 - нет `NVME_OK` — проверить PCI BAR, queue phase, DMA physical base и Flush;
 - нет `VAFS_MOUNT_OK` — проверить обе CRC superblock и generation catalog;
 - нет `SHELL_READY` — проверить terminal/VFS registration и nameserver IDs;
+- нет `EDITOR_READY` — проверить `.vlib` version, FS_ATTACH и shared argv;
+- нет `EDITOR_BUILD_OK` — проверить VEdit save и `/bin/fasm.elf`;
 - `SHELL_LS_OK` есть, но VGA пуст — проверить MMIO cap и `PAGE.BORROWED`;
 - IRQ storm — проверить one-shot mask/unmask и сброс состояния устройства.
 

@@ -1,0 +1,6 @@
+VLIB01
+name=filesystem
+service=3
+abi=1
+transport=ipc-capability
+interface=/system/lib/vfs.inc
