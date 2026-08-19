@@ -14,6 +14,9 @@ INITRAMFS = ROOT / "INITRAMFS.BIN"
 DISK = ROOT / "VOS.VHD"
 FASM_ARCHIVE = ROOT / "tools" / "fasm" / "fasm-1.73.35.tgz"
 FASM_SHA256 = "a34dec7d0bc2dc79faabb68bd8bc2f62b6cfb31d69c01449367ce4cd8098934e"
+INITRAMFS_SIZE = 192 * 1024
+DISK_SIZE = 1 * 1024 * 1024 * 1024
+VAFS_OFFSET = 4 * 1024 * 1024
 
 IR_HEADER = struct.Struct("<8sIIII")
 IR_ENTRY = struct.Struct("<32sIIII")
@@ -27,7 +30,8 @@ EXPECTED_PROGRAMS = {
     "client.elf",
     "terminal.elf",
     "keyboard.elf",
-    "ramfs.elf",
+    "nvme.elf",
+    "vafs.elf",
     "shell.elf",
     "memory_test.elf",
     "isolation_test.elf",
@@ -93,8 +97,8 @@ def check_elf(name: str, image: bytes) -> list[tuple[int, int, int, int]]:
 
 
 def check_initramfs(image: bytes) -> None:
-    if len(image) != 65536:
-        fail(f"INITRAMFS.BIN: ожидалось 65536 байт, получено {len(image)}")
+    if len(image) != INITRAMFS_SIZE:
+        fail(f"INITRAMFS.BIN: ожидалось {INITRAMFS_SIZE} байт, получено {len(image)}")
     magic, version, count, used, reserved = IR_HEADER.unpack_from(image)
     if (magic, version, reserved) != (b"VARNIR01", 1, 0):
         fail("initramfs: неверные magic/version/reserved")
@@ -141,7 +145,7 @@ def main() -> None:
     boot = BOOT.read_bytes()
     kernel = KERNEL.read_bytes()
     initramfs = INITRAMFS.read_bytes()
-    disk = DISK.read_bytes()
+    disk_size = DISK.stat().st_size
 
     if len(boot) != 512 + 4096:
         fail(f"BOOT.BIN: ожидалось 4608 байт, получено {len(boot)}")
@@ -150,9 +154,16 @@ def main() -> None:
     if len(kernel) != 65536:
         fail(f"KERNEL.BIN: ожидалось 65536 байт, получено {len(kernel)}")
     check_initramfs(initramfs)
-    if disk != boot + kernel + initramfs:
-        fail("VOS.VHD не является boot + kernel + initramfs")
-    if len(disk) % 512:
+    prefix = boot + kernel + initramfs
+    with DISK.open("rb") as disk_file:
+        if disk_file.read(len(prefix)) != prefix:
+            fail("VOS.VHD не начинается с boot + kernel + initramfs")
+        disk_file.seek(VAFS_OFFSET)
+        if disk_file.read(8) != b"VAFS\0\0\1\0":
+            fail("VOS.VHD не содержит VaraniaFS по смещению 4 MiB")
+    if disk_size != DISK_SIZE:
+        fail(f"VOS.VHD: ожидался sparse диск {DISK_SIZE}, получено {disk_size}")
+    if disk_size % 512:
         fail("размер диска должен быть кратен сектору 512 байт")
     archive_hash = hashlib.sha256(FASM_ARCHIVE.read_bytes()).hexdigest()
     if archive_hash != FASM_SHA256:
@@ -162,7 +173,8 @@ def main() -> None:
     print(f"  загрузчик: {len(boot)} байт (1 + 8 секторов)")
     print(f"  ядро:      {len(kernel)} байт (128 секторов)")
     print(f"  initramfs: {len(initramfs)} байт, {len(EXPECTED_PROGRAMS)} ELF64")
-    print(f"  диск:      {len(disk)} байт ({len(disk) // 512} секторов)")
+    print(f"  диск:      {disk_size} байт ({disk_size // 512} секторов, sparse)")
+    print("  VaraniaFS: offset 4 MiB, format v1")
     print("  ELF:       ET_EXEC/x86-64, PT_LOAD, W^X и границы подтверждены")
     print("  FASM:      SHA-256 подтверждён")
 

@@ -40,5 +40,7 @@ exec "$QEMU_BIN" \
   -cpu max \
   -m 128M \
   -drive "format=raw,file=$PROJECT_ROOT/VOS.VHD" \
+  -drive "if=none,id=varania-nvme,format=raw,file=$PROJECT_ROOT/VARANIA.VAFS" \
+  -device "nvme,drive=varania-nvme,serial=VARANIA0001" \
   "${QEMU_DISPLAY_ARGS[@]}" \
   "$@"

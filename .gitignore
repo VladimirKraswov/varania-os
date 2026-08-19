@@ -3,6 +3,8 @@
 .opencode/
 build_test/
 build/
+VOS.VHD
+*.VAFS
 
 # Диагностические файлы QEMU
 *.log

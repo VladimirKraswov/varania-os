@@ -12,7 +12,9 @@ InitramfsEntry.name   = 0
 InitramfsEntry.offset = 32
 InitramfsEntry.size   = 36
 InitramfsEntry.bytes  = 48
-INITRAMFS_MAX_FILES   = 32
+;// Sysroot self-hosted сборки состоит из сотен небольших include-файлов.
+;// Предел защищает от повреждённого заголовка и не расходует RAM сам по себе.
+INITRAMFS_MAX_FILES   = 512
 
 initramfs_base dq 0
 initramfs_used dd 0

@@ -31,7 +31,9 @@ flowchart TB
     D -->|"ASCII"| T["VGA terminal"]
     T -->|"MMIO cap"| K
     H["shell"] -->|"terminal IPC"| T
-    H -->|"filesystem IPC"| F["RAMFS driver"]
+    H -->|"filesystem IPC"| F["VaraniaFS server"]
+    F -->|"block IPC"| B["NVMe driver"]
+    B -->|"MMIO + DMA caps"| K
     K --> M["PMM / VMM / scheduler"]
 ```
 
@@ -62,7 +64,10 @@ Bootstrap ELF loader всё ещё находится в kernel, потому ч
 | 0 | 512 Б | MBR и `55 AA` | `0x7C00` |
 | 1–8 | 4096 Б | stage 2 | `0x1000` |
 | 9–136 | 65536 Б | microkernel | `0x60000 → 0x100000` |
-| 137–264 | 65536 Б | initramfs | `0x70000 → 0x400000` |
+| 137–520 | 196608 Б | initramfs | `0x60000 → 0x400000` |
+
+Compatibility boot занимает только первые 260 KiB. С 4 MiB в `VOS.VHD`
+начинается VaraniaFS; отдельный `VARANIA.VAFS` подключается как NVMe namespace.
 
 PMM освобождает только E820 usable pages начиная с `0x500000`, поэтому kernel,
 initramfs, GDT/TSS, stacks и bitmap не могут случайно попасть в allocator.
@@ -88,11 +93,12 @@ User layout:
 | `0x00010000..0x3FFFFFFF` | ELF `PT_LOAD` и heap |
 | `0x40000000..0x7FFFFFFF` | convention для user object/shared mappings |
 | `0x50000000` | VGA MMIO только в address space terminal |
-| `0x80000000..0x8000FFFF` | bootfs, только procd, R+NX |
+| `0x80000000..0x8002FFFF` | bootfs, только procd, R+NX |
 | до `0x00007FFFFFF00000` | растущий user stack |
 
-Heap начинается с выровненного максимального конца `PT_LOAD`, ограничен 256
-страницами. Stack стартует с одной RW+NX page и растёт строго по одной соседней
+Heap начинается с выровненного максимального конца `PT_LOAD`, ограничен 4096
+страницами (16 MiB). Frames создаются demand-paged вызовом `BRK`, не заранее.
+Stack стартует с одной RW+NX page и растёт строго по одной соседней
 странице, максимум до 16 pages.
 
 ## Kernel objects и ownership
@@ -105,7 +111,7 @@ Heap начинается с выровненного максимального
 | `Endpoint` | heap object + queue | strong refcount |
 | `Frame` | heap metadata + physical frame | strong refcount до map |
 | `AddressSpace` | heap metadata + CR3 | strong refcount |
-| `SharedMemory` | metadata + 1..16 frames | strong refcount, много mappings |
+| `SharedMemory` | metadata + 1..64 frames | strong refcount, много mappings |
 | `Process` | slot+generation token | таблица TCB + WAIT lifecycle |
 | `IRQ` | irq+1 | уникальная маршрутизация |
 | `I/O` | base+length | value capability |
@@ -145,11 +151,11 @@ teardown не освобождает leaf frame. Для shared memory mapping re
 Интерактивная цепочка целиком находится в ring 3. Keyboard driver получает
 IRQ1 и порты PS/2, переводит scan code set 1 в ASCII и отправляет `TERM_KEY`.
 Terminal владеет одной VGA MMIO page, cursor, scrolling, echo и line discipline.
-Shell получает готовую строку и общается с RAMFS отдельным FS-протоколом.
-
-RAMFS — не часть initramfs: initramfs является read-only boot archive для ELF,
-а RAMFS — изменяемое runtime-дерево каталогов. Ядро не знает `ls`, path, inode
-или имя файла. Подробный ABI описан в [FILESYSTEM.md](FILESYSTEM.md).
+Shell получает готовую строку и общается с `vafs.elf` отдельным FS-протоколом.
+VFS, в свою очередь, имеет только endpoint NVMe block service и приватные
+shared windows клиентов. Ядро не знает `ls`, path, extent или имя файла.
+Подробный ABI описан в [FILESYSTEM.md](FILESYSTEM.md), on-disk формат — в
+[VAFS.md](VAFS.md).
 
 ## Дерево происхождения capabilities
 
@@ -169,7 +175,7 @@ IPC transfer — descendant. Пока capability лежит в endpoint queue, �
 ## Endpoint IPC
 
 Endpoint независим от TCB. Это позволяет передать сервисный канал без process
-capability. Queue содержит восемь сообщений; каждое — четыре qword и две
+capability. Queue содержит восемь сообщений; каждое — восемь qword и две
 capabilities. Пустой receive блокирует thread, полный send возвращает `-11`.
 
 Один waiting receiver удерживает endpoint ссылкой, поэтому закрытие последнего

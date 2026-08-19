@@ -30,6 +30,10 @@ SYS_SHARED_CREATE   = 25
 SYS_SHARED_MAP      = 26
 SYS_CAP_REVOKE      = 27
 SYS_MMIO_MAP        = 28
+SYS_IO_READ32       = 29
+SYS_IO_WRITE32      = 30
+SYS_MMIO_CREATE     = 31
+SYS_DMA_CREATE      = 32
 
 ERR_NOENT = -2
 ERR_BAD_HANDLE = -9
@@ -566,22 +570,132 @@ function syscall_shared_map
   pop rbx
 endf
 
-;// Отобразить одну страницу device MMIO в текущий процесс.
-;// Физический адрес никогда не приходит от user space: он уже заключён в
-;// CAP_MMIO, выданную bootstrap/device policy. RDI=cap, RSI=user virtual.
+;// Создать capability на диапазон MMIO. Это может сделать только bootstrap
+;// device manager, у которого есть CAP_SYSTEM|CREATE. Обычный драйвер уже получает
+;// готовую ослабленную capability и не может выбрать физический адрес.
+;// RDI=system cap, RSI=physical base, RDX=pages. RAX=handle/error.
+function syscall_mmio_create
+  push rbx
+  push r12
+  push r13
+  push r14
+  sub rsp, 8
+  mov r12, rsi
+  mov r13, rdx
+  call syscall_require_create
+  test rax, rax
+  jz .bad
+  test r12, PAGE_SIZE-1
+  jnz .invalid
+  test r13, r13
+  jz .invalid
+  cmp r13, 0xFFFF
+  ja .invalid
+  mov rax, r12
+  shr rax, 48
+  jnz .invalid                     ;// target packing хранит base в 48 битах
+  mov rax, r13
+  shl rax, 12
+  add rax, r12
+  jc .invalid
+  mov rdx, rax
+  shr rdx, 48
+  jnz .invalid
+  mov r14, r13
+  shl r14, 48
+  or r14, r12                     ;// pages:16 | physical_base:48
+  mov edi, [current_task]
+  mov esi, CAP_MMIO
+  mov rdx, r14
+  mov ecx, CAP_MAP+CAP_READ+CAP_WRITE
+  call capability_insert
+  test rax, rax
+  jz .no_memory
+  jmp .done
+  .bad:
+  mov rax, ERR_BAD_HANDLE
+  jmp .done
+  .invalid:
+  mov rax, ERR_INVALID
+  jmp .done
+  .no_memory:
+  mov rax, ERR_NO_MEMORY
+  .done:
+  add rsp, 8
+  pop r14
+  pop r13
+  pop r12
+  pop rbx
+endf
+
+;// Выделить физически непрерывный DMA-буфер и вернуть его как обычную
+;// SharedMemory capability. Только держатель CAP_DMA_POOL увидит физический base.
+;// RDI=dma-pool cap, RSI=pages. RAX=shared handle/error, RDX=physical base.
+function syscall_dma_create
+  push rbx
+  push r12
+  push r13
+  sub rsp, 8
+  mov r12, rsi
+  mov esi, CAP_DMA_POOL
+  mov edx, CAP_CREATE
+  call capability_lookup
+  test rax, rax
+  jz .bad
+  mov rdi, r12
+  call shared_memory_create_contiguous
+  test rax, rax
+  jz .no_memory
+  mov rbx, rax
+  mov r13, rdx
+  mov edi, [current_task]
+  call task_by_index
+  mov rdi, rax
+  mov esi, CAP_SHARED
+  mov rdx, rbx
+  mov ecx, CAP_MAP+CAP_READ+CAP_WRITE
+  call capability_insert_task
+  test rax, rax
+  jz .release_failed
+  push rax
+  mov edi, CAP_SHARED
+  mov rsi, rbx
+  call object_release
+  pop rax
+  mov rdx, r13
+  jmp .done
+  .release_failed:
+  mov edi, CAP_SHARED
+  mov rsi, rbx
+  call object_release
+  .no_memory:
+  mov rax, ERR_NO_MEMORY
+  xor edx, edx
+  jmp .done
+  .bad:
+  mov rax, ERR_BAD_HANDLE
+  xor edx, edx
+  .done:
+  add rsp, 8
+  pop r13
+  pop r12
+  pop rbx
+endf
+
+;// Отобразить весь доверенный device MMIO range в текущий процесс.
+;// RDI=cap, RSI=user virtual. RAX=0/error.
 function syscall_mmio_map
   push rbx
   push r12
   push r13
   push r14
+  push r15
+  sub rsp, 8
   mov r12, rsi
   test r12, PAGE_SIZE-1
   jnz .invalid
   cmp r12, USER.imageMin
   jb .invalid
-  mov rax, USER.limit-PAGE_SIZE
-  cmp r12, rax
-  ja .invalid
   mov esi, CAP_MMIO
   ;// x86-64 не умеет write-only PTE: RW mapping неизбежно доступен для чтения.
   ;// Поэтому capability честно обязана содержать READ, WRITE и MAP.
@@ -589,28 +703,69 @@ function syscall_mmio_map
   call capability_lookup
   test rax, rax
   jz .bad
-  mov r13, rax                     ;// доверенный физический адрес страницы
-  test r13, PAGE_SIZE-1
-  jnz .invalid
+  mov r13, rax
+  mov r14, rax
+  shr r14, 48                     ;// число страниц
+  shl r13, 16
+  shr r13, 16                     ;// physical base в младших 48 битах
+  test r14, r14
+  jz .invalid
+  mov rax, r14
+  shl rax, 12
+  add rax, r12
+  jc .invalid
+  mov rdx, USER.limit
+  cmp rax, rdx
+  ja .invalid
   mov edi, [current_task]
   call task_by_index
   mov rbx, [rax+Task.space]
   test rbx, rbx
   jz .invalid
-  mov rdi, [rbx+AddressSpace.cr3]
-  mov rsi, r12
-  call vmm_translate_user
-  test rax, rax
-  jnz .busy
-  mov rdi, [rbx+AddressSpace.cr3]
-  mov rsi, r12
-  mov rdx, r13
-  mov rcx, PAGE.US+PAGE.RW+PAGE.NX+PAGE.BORROWED
-  call vmm_map_in_space
-  test rax, rax
-  jz .no_memory
+  xor r15d, r15d
+  .check_page:
+    cmp r15, r14
+    jae .map_pages
+    mov rsi, r15
+    shl rsi, 12
+    add rsi, r12
+    mov rdi, [rbx+AddressSpace.cr3]
+    call vmm_translate_user
+    test rax, rax
+    jnz .busy
+    inc r15
+    jmp .check_page
+  .map_pages:
+    xor r15d, r15d
+  .map_page:
+    cmp r15, r14
+    jae .success
+    mov rsi, r15
+    shl rsi, 12
+    add rsi, r12
+    mov rdx, r15
+    shl rdx, 12
+    add rdx, r13
+    mov rdi, [rbx+AddressSpace.cr3]
+    mov rcx, PAGE.US+PAGE.RW+PAGE.NX+PAGE.BORROWED
+    call vmm_map_in_space
+    test rax, rax
+    jz .rollback
+    inc r15
+    jmp .map_page
+  .success:
   xor eax, eax
   jmp .done
+  .rollback:
+    test r15, r15
+    jz .no_memory
+    dec r15
+    mov rsi, r15
+    shl rsi, 12
+    add rsi, r12
+    mov rdi, [rbx+AddressSpace.cr3]
+    call vmm_unmap_in_space
+    jmp .rollback
   .bad:
   mov rax, ERR_BAD_HANDLE
   jmp .done
@@ -623,6 +778,8 @@ function syscall_mmio_map
   .invalid:
   mov rax, ERR_INVALID
   .done:
+  add rsp, 8
+  pop r15
   pop r14
   pop r13
   pop r12
@@ -894,6 +1051,14 @@ function syscall_dispatch
   je .cap_revoke
   cmp rax, SYS_MMIO_MAP
   je .mmio_map
+  cmp rax, SYS_IO_READ32
+  je .io_read32
+  cmp rax, SYS_IO_WRITE32
+  je .io_write32
+  cmp rax, SYS_MMIO_CREATE
+  je .mmio_create
+  cmp rax, SYS_DMA_CREATE
+  je .dma_create
   mov qword [r12+Context.rax], ERR_NOSYS
   jmp .resume_current
 
@@ -1037,6 +1202,22 @@ function syscall_dispatch
   mov [r12+Context.rax], rax
   jmp .resume_current
 
+  .mmio_create:
+  mov rdi, [r12+Context.rdi]
+  mov rsi, [r12+Context.rsi]
+  mov rdx, [r12+Context.rdx]
+  call syscall_mmio_create
+  mov [r12+Context.rax], rax
+  jmp .resume_current
+
+  .dma_create:
+  mov rdi, [r12+Context.rdi]
+  mov rsi, [r12+Context.rsi]
+  call syscall_dma_create
+  mov [r12+Context.rax], rax
+  mov [r12+Context.rdx], rdx
+  jmp .resume_current
+
   .io_read8:
   mov rdi, [r12+Context.rdi]
   mov rsi, [r12+Context.rsi]
@@ -1049,6 +1230,21 @@ function syscall_dispatch
   mov rsi, [r12+Context.rsi]
   mov rdx, [r12+Context.rdx]
   call device_io_write8
+  mov [r12+Context.rax], rax
+  jmp .resume_current
+
+  .io_read32:
+  mov rdi, [r12+Context.rdi]
+  mov rsi, [r12+Context.rsi]
+  call device_io_read32
+  mov [r12+Context.rax], rax
+  jmp .resume_current
+
+  .io_write32:
+  mov rdi, [r12+Context.rdi]
+  mov rsi, [r12+Context.rsi]
+  mov rdx, [r12+Context.rdx]
+  call device_io_write32
   mov [r12+Context.rax], rax
   jmp .resume_current
 

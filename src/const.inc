@@ -19,14 +19,16 @@
 ;//                     блок данных трамплина 0x1F40
 ;// 0x002000-0x00FFFF  32-битный стек загрузчика (растёт вниз с 0x10000)
 ;// 0x010000-0x014FFF  стартовые таблицы (identity + HHDM)
-;// 0x060000-0x06FFFF  временная загрузка ядра (16-битный DMA, < 1 MiB)
+;// 0x050000-0x05FFFF  временная загрузка ядра (16-битный DMA, < 1 MiB)
+;// 0x060000-0x08FFFF  временный bootstrap initramfs (192 KiB)
 ;// 0x100000-0x10FFFF  ядро (64 KiB), вирт. KERNEL.base
-;// 0x110000-0x2DEFFF  bootstrap-резерв (ниже PMM.memStart)
+;// 0x110000-0x3EFFFF  bootstrap-резерв
 ;// 0x2DF000-0x2DF037  GDT64
 ;// 0x2DF060-0x2DF0C7  TSS64
 ;// 0x2E0000-0x2EFFFF  аварийный стек IST (растёт вниз с IST.top = 0x2F0000)
 ;// 0x2F0000-0x2FFFFF  стек ядра (растёт вниз с STACK.top = 0x300000)
 ;// 0x3F0000-0x3F7FFF  битовая карта PMM (8 кадров)
+;// 0x400000-0x42FFFF  bootstrap initramfs: ELF, FASM и базовые службы
 ;//
 ;// HHDM (Higher Half Direct Map, PML4[256]) отображает физ. 0..1 GiB:
 ;//   0xFFFF800000000000 + physical_address
@@ -74,18 +76,18 @@ PT.PD_HI      = 0x14000  ;// PD верхней половины
 PT.DIRECT_PAGES = 512    ;// 512 * 2 MiB = 1 GiB физической памяти
 
 ;//// Физические адреса ядра и служебных данных
-KERNEL.tempBase    = 0x60000  ;// Временный физ. адрес ядра (16-битный DMA, < 1 MiB)
+KERNEL.tempBase    = 0x50000  ;// Временный физ. адрес ядра (16-битный DMA, < 1 MiB)
 KERNEL.physBase    = 0x100000 ;// Физический адрес ядра
 KERNEL.size        = 65536    ;// Размер ядра в байтах (128 секторов)
 KERNEL.sectors     = KERNEL.size/512
 KERNEL.firstSector = BOOT2.firstSector+(BOOT2.size/512) ;// LBA первого сектора ядра
 
-;//// Initramfs загружается BIOS во временный буфер, а protected-mode этап
-;//// переносит его выше первого MiB. Фиксированный размер упрощает учебный
-;//// загрузчик: формат архива всё равно содержит фактический total_size.
-INITRAMFS.tempBase    = 0x70000
+;//// Initramfs содержит только доверенный bootstrap: procd, init и драйверы.
+;//// Исходники и результаты self-hosted сборки живут на системном диске.
+;//// 192 KiB целиком помещаются ниже 0x90000 и не зависят от EBDA/VGA.
+INITRAMFS.tempBase    = 0x60000
 INITRAMFS.physBase    = 0x400000
-INITRAMFS.size        = 65536
+INITRAMFS.size        = 0x30000
 INITRAMFS.sectors     = INITRAMFS.size/512
 INITRAMFS.firstSector = KERNEL.firstSector+KERNEL.sectors
 
@@ -170,5 +172,5 @@ IST.rspHi = IST.rsp shr 32 ;// старшие 32 бита
 PMM.bitmap     = 0x3F0000  ;// Физ. адрес битовой карты кадров
 PMM.bitmapSize = 32768     ;// 32 KiB = 1 бит на 4 KiB кадр (до 1 GiB)
 PMM.frames     = PMM.bitmapSize*8 ;// Макс. число кадров в карте (262144)
-PMM.memStart   = 0x500000  ;// всё ниже остаётся bootstrap-резервом
+PMM.memStart   = 0x500000  ;// bootstrap-области не выдаются задачам
 PMM.memEnd     = 0x40000000 ;// Верх (ограничение, уточняется по E820)

@@ -17,6 +17,7 @@ CAP_SPACE    = 7
 CAP_BOOTFS   = 8
 CAP_SHARED   = 9
 CAP_MMIO     = 10
+CAP_DMA_POOL = 11
 
 CAP_SEND     = 1
 CAP_READ     = 2
@@ -38,7 +39,9 @@ AddressSpace.cr3   = 16
 AddressSpace.shared_head = 24
 AddressSpace.bytes = 32
 
-SHARED_MAX_PAGES = 16
+;// 64 pages = 256 KiB: достаточно для файлового окна и ELF bootstrap,
+;// но всё ещё мало, чтобы случайно скрыть отсутствие streaming-протокола.
+SHARED_MAX_PAGES = 64
 SharedMemory.page_count = 16
 SharedMemory.frames     = 24       ;// SHARED_MAX_PAGES qword
 SharedMemory.bytes      = 152
@@ -48,21 +51,23 @@ SharedMapping.shm  = 8
 SharedMapping.bytes = 16
 
 ENDPOINT_QUEUE_SIZE = 8
-IPC_WORD_COUNT      = 4
+;// Восемь qword дают 56 байт payload после кода операции.
+;// Сами блоки файлов ходят через shared memory, а не копируются в IPC.
+IPC_WORD_COUNT      = 8
 IPC_CAP_COUNT       = 2
 
 Endpoint.waiter       = 16         ;// task token или 0
 Endpoint.head         = 24
 Endpoint.tail         = 32
 Endpoint.count        = 40
-Endpoint.sender       = 48         ;// 8 qword
-Endpoint.words        = 112        ;// 8 сообщений * 4 qword
-Endpoint.cap_count    = 368        ;// 8 qword
-Endpoint.cap_target   = 432        ;// 8 * 2 qword
-Endpoint.cap_rights   = 560        ;// 8 * 2 qword
-Endpoint.cap_type     = 688        ;// 8 * 2 qword
-Endpoint.cap_node     = 816        ;// ghost lineage node на время enqueue
-Endpoint.bytes        = 944
+Endpoint.sender       = 48
+Endpoint.words        = Endpoint.sender+ENDPOINT_QUEUE_SIZE*8
+Endpoint.cap_count    = Endpoint.words+ENDPOINT_QUEUE_SIZE*IPC_WORD_COUNT*8
+Endpoint.cap_target   = Endpoint.cap_count+ENDPOINT_QUEUE_SIZE*8
+Endpoint.cap_rights   = Endpoint.cap_target+ENDPOINT_QUEUE_SIZE*IPC_CAP_COUNT*8
+Endpoint.cap_type     = Endpoint.cap_rights+ENDPOINT_QUEUE_SIZE*IPC_CAP_COUNT*8
+Endpoint.cap_node     = Endpoint.cap_type+ENDPOINT_QUEUE_SIZE*IPC_CAP_COUNT*8
+Endpoint.bytes        = Endpoint.cap_node+ENDPOINT_QUEUE_SIZE*IPC_CAP_COUNT*8
 
 ;// Тип использует heap object и участвует в refcount.
 leaf_function object_is_reference_counted
@@ -223,6 +228,68 @@ function shared_memory_create
   jmp .done
   .success:
   mov rax, rbx
+  .done:
+  pop r14
+  pop r13
+  pop r12
+  pop rbx
+endf
+
+;// Создать SharedMemory из физически соседних кадров. Объект и mapping lifetime
+;// остаются теми же, что у обычной shared memory; отличается только allocator.
+;// RDI=pages. RAX=SharedMemory или 0, RDX=физический base при успехе.
+function shared_memory_create_contiguous
+  push rbx
+  push r12
+  push r13
+  push r14
+  mov r12, rdi
+  test r12, r12
+  jz .failed
+  cmp r12, SHARED_MAX_PAGES
+  ja .failed
+  mov rdi, SharedMemory.bytes
+  call kmalloc
+  test rax, rax
+  jz .failed
+  mov rbx, rax
+  mov rdi, rax
+  xor eax, eax
+  mov ecx, SharedMemory.bytes/8
+  rep stosq
+  mov rdi, r12
+  call pmm_alloc_contiguous
+  test rax, rax
+  jz .free_object
+  mov r14, rax
+  mov qword [rbx+Object.type], CAP_SHARED
+  mov qword [rbx+Object.refs], 1
+  mov [rbx+SharedMemory.page_count], r12
+  xor r13d, r13d
+  .frame:
+    cmp r13, r12
+    jae .zero
+    mov rax, r13
+    shl rax, 12
+    add rax, r14
+    mov [rbx+SharedMemory.frames+r13*8], rax
+    inc r13
+    jmp .frame
+  .zero:
+    hhdm_address rdi, r14
+    xor esi, esi
+    mov rdx, r12
+    shl rdx, 12
+    call memory_set
+    mov rax, rbx
+    mov rdx, r14
+    jmp .done
+  .free_object:
+    mov rdi, rbx
+    call kfree
+  .failed:
+    xor eax, eax
+    xor edx, edx
   .done:
   pop r14
   pop r13

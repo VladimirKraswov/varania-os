@@ -12,6 +12,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE = ROOT / "VOS.VHD"
+NVME_IMAGE = ROOT / "VARANIA.VAFS"
 
 
 def boot_until(markers: tuple[bytes, ...], timeout: float = 10.0) -> bytes:
@@ -25,6 +26,8 @@ def boot_until(markers: tuple[bytes, ...], timeout: float = 10.0) -> bytes:
         "-cpu", "max",
         "-m", "128M",
         "-drive", f"format=raw,file={IMAGE}",
+        "-drive", f"if=none,id=varania-nvme,format=raw,file={NVME_IMAGE}",
+        "-device", "nvme,drive=varania-nvme,serial=VARANIA0001",
         "-display", "none",
         "-serial", "none",
         "-monitor", "none",

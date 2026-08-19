@@ -15,6 +15,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE = ROOT / "VOS.VHD"
+NVME_IMAGE = ROOT / "VARANIA.VAFS"
 MARKER = b"VARANIA:MICROKERNEL_OK"
 FAULT_MARKER = b"terminated user task"
 IPC_QUEUE_MARKER = b"VARANIA:IPC_QUEUE_OK"
@@ -23,6 +24,8 @@ DRIVER_MARKER = b"keyboard-driver: waiting for IRQ1"
 DRIVER_IRQ_MARKER = b"keyboard-driver: IRQ1 handled"
 PROCD_MARKER = b"procd: init started; process service ready"
 NAMESERVER_MARKER = b"nameserver: service endpoint registered"
+NVME_MARKER = b"VARANIA:NVME_OK"
+VAFS_MARKER = b"VARANIA:VAFS_MOUNT_OK"
 
 
 def main() -> None:
@@ -40,6 +43,8 @@ def main() -> None:
         "-cpu", "max",
         "-m", "128M",
         "-drive", f"format=raw,file={IMAGE}",
+        "-drive", f"if=none,id=varania-nvme,format=raw,file={NVME_IMAGE}",
+        "-device", "nvme,drive=varania-nvme,serial=VARANIA0001",
         "-display", "none",
         "-serial", "none",
         "-monitor", "none",
@@ -129,13 +134,19 @@ def main() -> None:
     if PROCD_MARKER not in output or NAMESERVER_MARKER not in output:
         print("ОШИБКА: не проверены user-space loader и capability discovery", file=sys.stderr)
         raise SystemExit(1)
+    if NVME_MARKER not in output:
+        print("ОШИБКА: не пройдены PCIe/NVMe DMA Read/Write/Flush", file=sys.stderr)
+        raise SystemExit(1)
+    if VAFS_MARKER not in output:
+        print("ОШИБКА: VaraniaFS не смонтировала целое COW-поколение", file=sys.stderr)
+        raise SystemExit(1)
     if DRIVER_MARKER not in output:
         print("ОШИБКА: ring-3 драйвер не дошёл до ожидания IRQ", file=sys.stderr)
         raise SystemExit(1)
     if DRIVER_IRQ_MARKER not in output:
         print("ОШИБКА: IRQ1 не дошёл до ring-3 драйвера", file=sys.stderr)
         raise SystemExit(1)
-    print("Smoke-тест QEMU пройден: user ELF loader, endpoint IPC, memory и ring-3 IRQ работают.")
+    print("Smoke-тест QEMU пройден: ELF/IPC/memory, IRQ, NVMe DMA и VaraniaFS mount работают.")
 
 
 if __name__ == "__main__":

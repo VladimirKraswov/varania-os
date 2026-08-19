@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end проверка клавиатуры, terminal, shell и RAMFS через QEMU."""
+"""End-to-end проверка keyboard, terminal, shell и persistent VaraniaFS."""
 
 from __future__ import annotations
 
@@ -17,12 +17,15 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE = ROOT / "VOS.VHD"
+NVME_IMAGE = ROOT / "VARANIA.VAFS"
 SHELL_READY = b"VARANIA:SHELL_READY"
 PROMPT_READY = b"VARANIA:SHELL_PROMPT_READY"
 LS_OK = b"VARANIA:SHELL_LS_OK"
 MKDIR_OK = b"VARANIA:SHELL_MKDIR_OK"
 CD_OK = b"VARANIA:SHELL_CD_OK"
 TOUCH_OK = b"VARANIA:SHELL_TOUCH_OK"
+CAT_OK = b"VARANIA:SHELL_CAT_OK"
+WRITE_OK = b"VARANIA:SHELL_WRITE_OK"
 
 
 class QmpClient:
@@ -97,7 +100,7 @@ def wait_debug(
 
 def type_command(qmp: QmpClient, command: str) -> None:
     """Ввести ASCII-команду настоящими PS/2 key events."""
-    key_names = {" ": "spc"}
+    key_names = {" ": "spc", ".": "dot", "/": "slash"}
     for character in command:
         key = key_names.get(character, character)
         qmp.hmp(f"sendkey {key} 20")
@@ -127,6 +130,14 @@ def main() -> None:
         print(f"ОШИБКА: не найден {qemu_name}", file=sys.stderr)
         raise SystemExit(1)
 
+    # Тест повторяем: убрать только каталог, который сам тест создаёт. Host CLI
+    # пишет новое COW-поколение и не затрагивает остальные данные тома.
+    subprocess.run(
+        [sys.executable, str(ROOT / "tools/vafs/vafs.py"), "rm",
+         str(NVME_IMAGE), "/demo", "--recursive"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+    )
+
     temporary = Path(tempfile.mkdtemp(prefix="varania-shell-", dir="/tmp"))
     qmp_path = temporary / "qmp.sock"
     command = [
@@ -135,6 +146,8 @@ def main() -> None:
         "-cpu", "max",
         "-m", "128M",
         "-drive", f"format=raw,file={IMAGE}",
+        "-drive", f"if=none,id=varania-nvme,format=raw,file={NVME_IMAGE}",
+        "-device", "nvme,drive=varania-nvme,serial=VARANIA0001",
         "-display", "none",
         "-serial", "none",
         "-monitor", "none",
@@ -158,29 +171,57 @@ def main() -> None:
         wait_debug(process, captured, LS_OK, 1)
         wait_debug(process, captured, PROMPT_READY, 2)
         root_screen = read_vga(client, temporary)
-        for expected in ("Welcome to Varania OS", "bin/", "etc/", "home/", "README"):
+        for expected in ("Welcome to Varania OS", "system/"):
             if expected not in root_screen:
                 raise AssertionError(f"на VGA после `ls` нет {expected!r}\n{root_screen}")
 
+        type_command(client, "cd system")
+        wait_debug(process, captured, CD_OK, 1)
+        wait_debug(process, captured, PROMPT_READY, 3)
+        type_command(client, "cd src")
+        wait_debug(process, captured, CD_OK, 2)
+        wait_debug(process, captured, PROMPT_READY, 4)
+        type_command(client, "cat const.inc")
+        wait_debug(process, captured, CAT_OK, 1)
+        wait_debug(process, captured, PROMPT_READY, 5)
+        type_command(client, "cd ..")
+        wait_debug(process, captured, CD_OK, 3)
+        wait_debug(process, captured, PROMPT_READY, 6)
+        type_command(client, "cd ..")
+        wait_debug(process, captured, CD_OK, 4)
+        wait_debug(process, captured, PROMPT_READY, 7)
+
         type_command(client, "mkdir demo")
         wait_debug(process, captured, MKDIR_OK, 1)
-        wait_debug(process, captured, PROMPT_READY, 3)
+        wait_debug(process, captured, PROMPT_READY, 8)
         type_command(client, "cd demo")
-        wait_debug(process, captured, CD_OK, 1)
-        wait_debug(process, captured, PROMPT_READY, 4)
+        wait_debug(process, captured, CD_OK, 5)
+        wait_debug(process, captured, PROMPT_READY, 9)
         type_command(client, "touch note")
         wait_debug(process, captured, TOUCH_OK, 1)
-        wait_debug(process, captured, PROMPT_READY, 5)
+        wait_debug(process, captured, PROMPT_READY, 10)
+        type_command(client, "write note hello")
+        wait_debug(process, captured, WRITE_OK, 1)
+        wait_debug(process, captured, PROMPT_READY, 11)
+        type_command(client, "cat note")
+        wait_debug(process, captured, CAT_OK, 2)
+        wait_debug(process, captured, PROMPT_READY, 12)
         type_command(client, "ls")
         wait_debug(process, captured, LS_OK, 2)
 
         child_screen = read_vga(client, temporary)
         for expected in ("varania:/demo$", "note"):
             if expected not in child_screen:
-                raise AssertionError(f"на VGA после lifecycle RAMFS нет {expected!r}\n{child_screen}")
+                raise AssertionError(f"на VGA после lifecycle VaraniaFS нет {expected!r}\n{child_screen}")
     except (AssertionError, OSError, RuntimeError, TimeoutError) as error:
+        if client is not None:
+            try:
+                print("\n--- VGA snapshot ---")
+                print(read_vga(client, temporary))
+            except (OSError, RuntimeError):
+                pass
         print(bytes(captured).decode("utf-8", errors="replace"), end="")
-        print(f"ОШИБКА: shell/RAMFS тест не пройден: {error}", file=sys.stderr)
+        print(f"ОШИБКА: shell/VaraniaFS тест не пройден: {error}", file=sys.stderr)
         raise SystemExit(1)
     finally:
         if client is not None:
@@ -193,8 +234,35 @@ def main() -> None:
             process.communicate()
         shutil.rmtree(temporary, ignore_errors=True)
 
+    verification = subprocess.run(
+        [sys.executable, str(ROOT / "tools/vafs/vafs.py"), "fsck",
+         str(NVME_IMAGE), "--data"],
+        capture_output=True, text=True, check=False,
+    )
+    tree = subprocess.run(
+        [sys.executable, str(ROOT / "tools/vafs/vafs.py"), "tree",
+         str(NVME_IMAGE), "/demo"],
+        capture_output=True, text=True, check=False,
+    )
+    extracted_fd, extracted_name = tempfile.mkstemp(prefix="varania-note-", dir="/tmp")
+    os.close(extracted_fd)
+    extracted = Path(extracted_name)
+    get_file = subprocess.run(
+        [sys.executable, str(ROOT / "tools/vafs/vafs.py"), "get",
+         str(NVME_IMAGE), "/demo/note", str(extracted)],
+        capture_output=True, text=True, check=False,
+    )
+    persisted = extracted.read_bytes() if get_file.returncode == 0 else b""
+    extracted.unlink(missing_ok=True)
+    if (verification.returncode or tree.returncode or get_file.returncode
+            or "note" not in tree.stdout or persisted != b"hello"):
+        print(verification.stdout + verification.stderr + tree.stdout + tree.stderr, end="")
+        print(get_file.stdout + get_file.stderr, end="")
+        print("ОШИБКА: COW-изменения не пережили остановку VM", file=sys.stderr)
+        raise SystemExit(1)
+
     print(bytes(captured).decode("utf-8", errors="replace"), end="")
-    print("Shell-тест пройден: PS/2 → terminal → shell → RAMFS и VGA работают end-to-end.")
+    print("Shell-тест пройден: PS/2 → shell → VaraniaFS/NVMe, remount fsck и VGA работают end-to-end.")
 
 
 if __name__ == "__main__":

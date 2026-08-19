@@ -31,8 +31,8 @@ make clean && make test
 
 Проверяются:
 
-1. сборка boot/kernel, 18 user ELF, initramfs и raw image;
-2. `55 AA`, размеры, точная конкатенация и SHA-256 FASM;
+1. сборка boot/kernel, 19 user ELF, 192-KiB initramfs и двух sparse images;
+2. `55 AA`, размеры, точная boot-конкатенация и SHA-256 FASM;
 3. каждый ELF header/program header, file bounds, W^X и page overlap;
 4. многостраничные RX/RW segments `memory_test.elf`;
 5. реальная загрузка `qemu-system-x86_64` в TCG;
@@ -42,7 +42,9 @@ make clean && make test
 9. lineage tree, revoke двух поколений и сохранение root capability;
 10. внешний kill blocked task и два перезапуска user-space supervisor;
 11. shared mapping двух страниц, IPC transfer и возврат frames после teardown;
-12. PS/2 → terminal → shell → RAMFS и фактический текст VGA после команд.
+12. PCIe/NVMe Identify, DMA Read/Write/Flush и восстановление test block;
+13. VaraniaFS COW/recovery/CRC32C на host и через ring-3 server;
+14. PS/2 → terminal → shell → VFS → NVMe, VGA и remount после записи.
 
 Тесты можно запускать отдельно:
 
@@ -67,8 +69,8 @@ make run
 ```
 
 После self-tests пользовательский terminal очищает VGA, печатает приветствие и
-shell показывает `varania:/$`. Команда `ls` выводит `bin/`, `etc/`, `home/` и
-`README`; доступны также `cd`, `mkdir`, `touch`, `pwd`, `clear`, `help`.
+shell показывает `varania:/$`. Команда `ls` читает с NVMe каталог `system/`;
+доступны `cd`, `mkdir`, `touch`, `cat`, `write`, `pwd`, `clear`, `help`.
 
 На macOS Cocoa display запускается полноэкранно с `zoom-to-fit`, чтобы VGA
 80×25 не был слишком мелким на Retina. Для обычного масштабируемого окна:
@@ -101,7 +103,9 @@ make debug
 - нет `REVOKE_OK` — проверить CapNode parent/ghost/pinned и rollback IPC;
 - нет `SUPERVISOR_OK` — проверить CONTROL grant, cancel block и WAIT status;
 - нет `SHM_OK` — проверить borrowed PTE, mapping ref и права shared cap;
-- нет `SHELL_READY` — проверить terminal/RAMFS registration и nameserver IDs;
+- нет `NVME_OK` — проверить PCI BAR, queue phase, DMA physical base и Flush;
+- нет `VAFS_MOUNT_OK` — проверить обе CRC superblock и generation catalog;
+- нет `SHELL_READY` — проверить terminal/VFS registration и nameserver IDs;
 - `SHELL_LS_OK` есть, но VGA пуст — проверить MMIO cap и `PAGE.BORROWED`;
 - IRQ storm — проверить one-shot mask/unmask и сброс состояния устройства.
 
@@ -132,7 +136,7 @@ make debug
 4. Обновить `docs/ARCHITECTURE.md`.
 5. Выполнить `make clean && make test`.
 
-Образ ядра и initramfs фиксированы на 64 KiB каждый. IDT начинается в kernel со
+Образ ядра фиксирован на 64 KiB, initramfs — на 192 KiB. IDT начинается в kernel со
 смещения `0xF000`; FASM останавливает сборку при наложении кода на IDT.
 
 ## Изменение user ABI

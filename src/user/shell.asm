@@ -3,11 +3,12 @@ entry start
 include "abi.inc"
 
 ;// Первый интерактивный процесс Varania OS. Shell не имеет доступа ни к VGA,
-;// ни к PS/2, ни к структурам RAMFS: он знает только IPC endpoints сервисов.
+;// ни к PS/2, ни к структурам VaraniaFS: он знает только IPC endpoints сервисов.
 ;// Это и есть практическая граница между приложением и user-space drivers.
 SELF_EP       = 1
 NAMESERVER_EP = 2
 PATH_CAP      = 64
+FS_BUFFER_VA  = 0x0000000064000000
 
 IPC_WOULD_BLOCK = -11
 
@@ -19,11 +20,14 @@ start:
   js fatal
   mov [terminal_endpoint], rax
 
-  mov edi, SERVICE_RAMFS
+  mov edi, SERVICE_FILESYSTEM
   call lookup_service
   test rax, rax
   js fatal
   mov [filesystem_endpoint], rax
+  call filesystem_attach
+  test rax, rax
+  jnz fatal
 
   log ready_text, ready_text.size
   lea rdi, [shell_ready]
@@ -78,6 +82,16 @@ start:
   call starts_with
   test eax, eax
   jnz .touch
+  lea rdi, [line_buffer]
+  lea rsi, [prefix_cat]
+  call starts_with
+  test eax, eax
+  jnz .cat
+  lea rdi, [line_buffer]
+  lea rsi, [prefix_write]
+  call starts_with
+  test eax, eax
+  jnz .write
 
   lea rdi, [unknown_text]
   call print_z
@@ -112,6 +126,14 @@ start:
   lea rsi, [line_buffer+6]
   mov edi, FS_CREATE
   call command_create
+  jmp .prompt
+.cat:
+  lea rsi, [line_buffer+4]
+  call command_cat
+  jmp .prompt
+.write:
+  lea rsi, [line_buffer+6]
+  call command_write
   jmp .prompt
 
 fatal:
@@ -155,6 +177,31 @@ lookup_service:
 .done:
   pop r12
   pop rbx
+  ret
+
+;// Получить собственное shared file window у VFS и отобразить его.
+filesystem_attach:
+  call prepare_fs_request
+  mov qword [ipc_message+IpcMessage.words], FS_ATTACH
+  call fs_rpc
+  test rax, rax
+  jnz .done
+  cmp qword [ipc_reply+IpcMessage.cap_count], 1
+  jne .invalid
+  mov rdx, qword [ipc_reply+IpcMessage.words+8]
+  cmp rdx, PAGE_SIZE
+  jb .invalid
+  mov [filesystem_buffer_size], rdx
+  mov rdi, qword [ipc_reply+IpcMessage.caps+IpcCap.handle]
+  mov [filesystem_buffer_cap], rdi
+  mov eax, SYS_SHARED_MAP
+  mov rsi, FS_BUFFER_VA
+  mov edx, SPACE_MAP_WRITE
+  syscall
+  ret
+.invalid:
+  mov rax, -22
+.done:
   ret
 
 ;// Напечатать NUL-terminated строку. RDI=address.
@@ -250,10 +297,10 @@ read_line:
   test rax, rax
   jnz .done
   mov rdx, qword [ipc_reply+IpcMessage.words+8]
-  cmp rdx, 15
+  cmp rdx, 47
   ja .invalid
   lea rdi, [line_buffer]
-  mov ecx, 16
+  mov ecx, 48
   xor eax, eax
   rep stosb
   lea rsi, [ipc_reply+IpcMessage.words+16]
@@ -328,8 +375,117 @@ command_create:
   pop rbx
   ret
 
+;// RSI=name. LOOKUP получает object ID, READ переносит данные через отдельное
+;// shared window; IPC остаётся control plane и не копирует байты файла.
+command_cat:
+  push rbx
+  push r12
+  push r13
+  mov edi, FS_LOOKUP
+  call fs_named_request
+  test rax, rax
+  jnz .error
+  cmp qword [ipc_reply+IpcMessage.words+16], FS_NODE_FILE
+  jne .error
+  mov r12, qword [ipc_reply+IpcMessage.words+8]
+  xor r13d, r13d
+.read:
+  call prepare_fs_request
+  mov qword [ipc_message+IpcMessage.words], FS_READ
+  mov qword [ipc_message+IpcMessage.words+8], r12
+  mov qword [ipc_message+IpcMessage.words+16], r13
+  mov qword [ipc_message+IpcMessage.words+24], PAGE_SIZE
+  mov qword [ipc_message+IpcMessage.words+32], 0
+  call fs_rpc
+  test rax, rax
+  jnz .error
+  mov rbx, qword [ipc_reply+IpcMessage.words+8]
+  test rbx, rbx
+  jz .success
+  mov rdi, FS_BUFFER_VA
+  mov rsi, rbx
+  call terminal_write
+  add r13, rbx
+  cmp rbx, PAGE_SIZE
+  je .read
+.success:
+  lea rdi, [newline]
+  call print_z
+  log cat_ok_text, cat_ok_text.size
+  jmp .done
+.error:
+  lea rdi, [fs_error_text]
+  call print_z
+.done:
+  pop r13
+  pop r12
+  pop rbx
+  ret
+
+;// RSI="NAME TEXT". Учебная команда намеренно заменяет файл атомарно целиком.
+command_write:
+  push rbx
+  push r12
+  push r13
+  mov r12, rsi
+  mov r13, rsi
+.separator:
+  mov al, [r13]
+  test al, al
+  jz .error
+  cmp al, ' '
+  je .split
+  inc r13
+  jmp .separator
+.split:
+  mov byte [r13], 0
+  inc r13
+  mov edi, FS_LOOKUP
+  mov rsi, r12
+  call fs_named_request
+  test rax, rax
+  jnz .error
+  cmp qword [ipc_reply+IpcMessage.words+16], FS_NODE_FILE
+  jne .error
+  mov rbx, qword [ipc_reply+IpcMessage.words+8]
+  xor ecx, ecx
+.length:
+  cmp byte [r13+rcx], 0
+  je .copy
+  inc ecx
+  cmp rcx, 47
+  jbe .length
+  jmp .error
+.copy:
+  mov rsi, r13
+  mov rdi, FS_BUFFER_VA
+  push rcx
+  rep movsb
+  pop rdx
+  call prepare_fs_request
+  mov qword [ipc_message+IpcMessage.words], FS_WRITE
+  mov qword [ipc_message+IpcMessage.words+8], rbx
+  mov qword [ipc_message+IpcMessage.words+16], 0
+  mov qword [ipc_message+IpcMessage.words+24], rdx
+  mov qword [ipc_message+IpcMessage.words+32], 0
+  call fs_rpc
+  test rax, rax
+  jnz .error
+  lea rdi, [write_ok]
+  call print_z
+  log write_ok_text, write_ok_text.size
+  jmp .done
+.error:
+  lea rdi, [fs_error_text]
+  call print_z
+.done:
+  pop r13
+  pop r12
+  pop rbx
+  ret
+
 ;// RSI=name. Смена каталога выполняется через LOOKUP, а не через локальное
-;// знание RAMFS. Это сохранит команду при появлении другого FS-драйвера.
+;// знание on-disk VaraniaFS. Это сохраняет команду при смене FS-драйвера.
 command_cd:
   push rbx
   push r12
@@ -413,7 +569,7 @@ fs_named_request:
   mov qword [ipc_message+IpcMessage.words+8], rax
   lea rdi, [ipc_message+IpcMessage.words+16]
   mov rsi, r12
-  mov ecx, 16
+  mov ecx, 48
 .copy_name:
   mov al, byte [rsi]
   mov byte [rdi], al
@@ -483,7 +639,7 @@ path_down:
   cmp byte [r12+rbx], 0
   je .measured
   inc rbx
-  cmp rbx, 15
+  cmp rbx, 47
   jbe .measure
   jmp .bad
 .measured:
@@ -592,19 +748,24 @@ cd_ok_text db "VARANIA:SHELL_CD_OK", 10
 .size = $-cd_ok_text
 touch_ok_text db "VARANIA:SHELL_TOUCH_OK", 10
 .size = $-touch_ok_text
+cat_ok_text db "VARANIA:SHELL_CAT_OK", 10
+.size = $-cat_ok_text
+write_ok_text db "VARANIA:SHELL_WRITE_OK", 10
+.size = $-write_ok_text
 failed_text db "shell: fatal service or IPC error", 10
 .size = $-failed_text
 
 shell_ready db "Shell is ready. Type 'help' for commands.", 10, 10, 0
 prompt_prefix db "varania:", 0
 prompt_suffix db "$ ", 0
-help_text db "Commands: ls, cd DIR, mkdir DIR, touch FILE, pwd, clear, help", 10, 0
+help_text db "Commands: ls, cd, mkdir, touch, cat, write, pwd, clear, help", 10, 0
 unknown_text db "Unknown command. Type 'help'.", 10, 0
 fs_error_text db "Filesystem operation failed.", 10, 0
 not_dir_text db "cd: target is not a directory.", 10, 0
 path_long_text db "cd: displayed path is too long.", 10, 0
 mkdir_ok db "Directory created.", 10, 0
 touch_ok db "File created.", 10, 0
+write_ok db "File written atomically.", 10, 0
 slash db "/", 0
 newline db 10, 0
 
@@ -615,14 +776,18 @@ cmd_clear db "clear", 0
 prefix_cd db "cd ", 0
 prefix_mkdir db "mkdir ", 0
 prefix_touch db "touch ", 0
+prefix_cat db "cat ", 0
+prefix_write db "write ", 0
 
 align 8
 terminal_endpoint dq 0
 filesystem_endpoint dq 0
+filesystem_buffer_cap dq 0
+filesystem_buffer_size dq 0
 current_node dq 0
 path_length dq 1
 current_path db '/', 0
 times PATH_CAP-2 db 0
-line_buffer rb 16
+line_buffer rb 48
 ipc_message rb IpcMessage.bytes
 ipc_reply rb IpcMessage.bytes

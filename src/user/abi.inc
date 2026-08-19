@@ -31,6 +31,10 @@ SYS_SHARED_CREATE   = 25
 SYS_SHARED_MAP      = 26
 SYS_CAP_REVOKE      = 27
 SYS_MMIO_MAP        = 28
+SYS_IO_READ32       = 29
+SYS_IO_WRITE32      = 30
+SYS_MMIO_CREATE     = 31
+SYS_DMA_CREATE      = 32
 
 CAP_SEND  = 1
 CAP_READ  = 2
@@ -45,16 +49,16 @@ CAP_MOVE    = 1 shl 63
 SPACE_MAP_WRITE = 1
 SPACE_MAP_EXEC  = 2
 
-IPC_WORD_COUNT = 4
+IPC_WORD_COUNT = 8
 IPC_CAP_COUNT  = 2
 IpcMessage.words     = 0
-IpcMessage.cap_count = 32
-IpcMessage.caps      = 40
-IpcMessage.sender    = 72
-IpcMessage.bytes     = 80
 IpcCap.handle        = 0
 IpcCap.rights        = 8
 IpcCap.bytes         = 16
+IpcMessage.cap_count = IPC_WORD_COUNT*8
+IpcMessage.caps      = IpcMessage.cap_count+8
+IpcMessage.sender    = IpcMessage.caps+IPC_CAP_COUNT*IpcCap.bytes
+IpcMessage.bytes     = IpcMessage.sender+8
 
 SpawnGrant.handle = 0
 SpawnGrant.rights = 8
@@ -79,6 +83,13 @@ NAMESERVER_LOOKUP   = 2
 SERVICE_DEMO     = 1
 SERVICE_TERMINAL = 2
 SERVICE_RAMFS    = 3
+SERVICE_FILESYSTEM = 3           ;// совместимый ID постоянного VFS-сервиса
+SERVICE_BLOCK    = 4
+
+BLOCK_ATTACH = 1
+BLOCK_READ   = 2
+BLOCK_WRITE  = 3
+BLOCK_FLUSH  = 4
 
 TERM_WRITE    = 1
 TERM_KEY      = 2
@@ -89,6 +100,10 @@ FS_LIST   = 1
 FS_LOOKUP = 2
 FS_MKDIR  = 3
 FS_CREATE = 4
+FS_ATTACH = 5
+FS_READ   = 6
+FS_WRITE  = 7
+FS_STAT   = 8
 FS_NODE_FILE = 1
 FS_NODE_DIR  = 2
 

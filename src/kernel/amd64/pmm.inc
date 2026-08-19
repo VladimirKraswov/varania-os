@@ -115,6 +115,74 @@ leaf_function pmm_alloc_frame
     xor eax, eax
 end_leaf
 
+;// Выделить RDI соседних физических кадров. Этот механизм нужен только
+;// для DMA-очередей устройств. Обычная user memory по-прежнему выделяется по одному
+;// кадру и не раскрывает физические адреса. RAX=base или 0.
+function pmm_alloc_contiguous
+  push rbx
+  push r12
+  push r13
+  push r14
+  mov r12, rdi
+  test r12, r12
+  jz .failed
+  cmp r12, [pmm_free_count]
+  ja .failed
+  hhdm_address rbx, PMM.bitmap
+  mov r13d, [pmm_search_from]
+  mov r14d, [pmm_max_frame]
+
+  .candidate:
+    mov rax, r13
+    add rax, r12
+    cmp rax, r14
+    ja .failed
+    xor ecx, ecx
+  .check:
+    cmp rcx, r12
+    jae .claim
+    mov rax, r13
+    add rax, rcx
+    bt qword [rbx], rax
+    jc .occupied
+    inc rcx
+    jmp .check
+  .occupied:
+    ;// Все starts до занятого кадра уже не могут вместить весь диапазон.
+    add r13, rcx
+    inc r13
+    jmp .candidate
+
+  .claim:
+    xor ecx, ecx
+  .claim_one:
+    cmp rcx, r12
+    jae .success
+    mov rax, r13
+    add rax, rcx
+    bts qword [rbx], rax
+    inc rcx
+    jmp .claim_one
+  .success:
+    sub [pmm_free_count], r12
+    mov rax, r13
+    add rax, r12
+    cmp eax, [pmm_search_from]
+    jbe .address
+    mov [pmm_search_from], eax
+  .address:
+    mov rax, r13
+    shl rax, 12
+    jmp .done
+  .failed:
+    xor eax, eax
+  .done:
+  pop r14
+  pop r13
+  pop r12
+  pop rbx
+endf
+
 ;// Освободить кадр RDI. Невыровненные/служебные адреса игнорируются.
 leaf_function pmm_free_frame
   test rdi, PAGE_SIZE-1

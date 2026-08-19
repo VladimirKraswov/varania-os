@@ -85,9 +85,8 @@ BOOT2.start:
   ;// Загрузка ядра во временный буфер (16-битный DMA, ниже 1 MiB)
   disk.load_sectors [disk_id], 0, KERNEL.firstSector, KERNEL.size/512, KERNEL.tempBase
 
-  ;// Initramfs также сначала читается ниже 1 MiB: классический BIOS EDD
-  ;// использует 16-битный адрес Segment:Offset. После входа в protected mode
-  ;// архив будет перенесён по постоянному физическому адресу 0x400000.
+  ;// Bootstrap-initramfs намеренно компактен: BIOS читает его в нижний
+  ;// MiB обычным EDD DAP, а protected-mode этап перенесёт архив выше.
   disk.load_sectors [disk_id], 0, INITRAMFS.firstSector, INITRAMFS.sectors, INITRAMFS.tempBase
 
   ;// Получаем от BIOS карту памяти (E820)

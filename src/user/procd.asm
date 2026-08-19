@@ -12,6 +12,8 @@ BOOTFS_CAP  = 3
 IRQ1_CAP    = 4
 IO_CAP      = 5
 VGA_CAP     = 6
+PCI_IO_CAP  = 7
+DMA_POOL_CAP = 8
 
 ELF_HEADER_SIZE = 64
 ELF_PH_SIZE     = 56
@@ -30,6 +32,14 @@ start:
   js fatal
   mov [bootfs_base], rax
   mov [bootfs_size], rdx
+
+  ;// До запуска init находим NVMe PCI function и заключаем её BAR0 в
+  ;// capability. Драйвер получит только MMIO range и DMA pool, но не весь PCI
+  ;// configuration space. Такая точечная policy пока живёт в procd; позже её вынесет devmgr.
+  call pci_prepare_nvme
+  test rax, rax
+  js fatal
+  mov [nvme_mmio_cap], rax
 
   ;// Bootstrap policy: единственный особый запрос procd — запустить init и
   ;// передать ему endpoint самого procd как handle 2.
@@ -83,6 +93,29 @@ start:
   jz .bad_request
   mov qword [policy_extra3], 0
   mov qword [policy_extra3_rights], 0
+  cmp r12, nvme_name.size
+  jne .keyboard_policy
+  lea rdi, [ipc_request+IpcMessage.words+8]
+  lea rsi, [nvme_name]
+  mov edx, nvme_name.size
+  call bytes_equal
+  test eax, eax
+  jz .keyboard_policy
+  ;// Handle 2 — nameserver от init, handle 3 — BAR, handle 4 — узкий DMA allocator.
+  xor edx, edx
+  xor ecx, ecx
+  cmp qword [ipc_request+IpcMessage.cap_count], 2
+  jb .nvme_devices
+  mov rdx, qword [ipc_request+IpcMessage.caps+IpcCap.bytes+IpcCap.handle]
+  mov rcx, qword [ipc_request+IpcMessage.caps+IpcCap.bytes+IpcCap.rights]
+  .nvme_devices:
+  mov r8, [nvme_mmio_cap]
+  mov r9d, CAP_MAP+CAP_READ+CAP_WRITE
+  mov qword [policy_extra3], DMA_POOL_CAP
+  mov qword [policy_extra3_rights], CAP_CREATE
+  jmp .load_requested
+
+  .keyboard_policy:
   cmp r12, keyboard_name.size
   jne .terminal_policy
   lea rdi, [ipc_request+IpcMessage.words+8]
@@ -108,7 +141,7 @@ start:
 
   .terminal_policy:
   cmp r12, terminal_name.size
-  jne .shared_policy
+  jne .vafs_policy
   lea rdi, [ipc_request+IpcMessage.words+8]
   lea rsi, [terminal_name]
   mov edx, terminal_name.size
@@ -124,6 +157,28 @@ start:
   .terminal_mmio:
   mov r8d, VGA_CAP
   mov r9d, CAP_MAP+CAP_READ+CAP_WRITE
+  jmp .load_requested
+
+  .vafs_policy:
+  cmp r12, vafs_name.size
+  jne .shared_policy
+  lea rdi, [ipc_request+IpcMessage.words+8]
+  lea rsi, [vafs_name]
+  mov edx, vafs_name.size
+  call bytes_equal
+  test eax, eax
+  jz .shared_policy
+  ;// VFS получает nameserver как handle 2 и только CREATE-право системной
+  ;// capability как handle 3: этого достаточно для per-client shared windows.
+  xor edx, edx
+  xor ecx, ecx
+  cmp qword [ipc_request+IpcMessage.cap_count], 2
+  jb .vafs_root
+  mov rdx, qword [ipc_request+IpcMessage.caps+IpcCap.bytes+IpcCap.handle]
+  mov rcx, qword [ipc_request+IpcMessage.caps+IpcCap.bytes+IpcCap.rights]
+  .vafs_root:
+  mov r8d, ROOT_CAP
+  mov r9d, CAP_CREATE
   jmp .load_requested
 
   .shared_policy:
@@ -295,6 +350,228 @@ bytes_equal:
   xor eax, eax
   ret
 
+;// Записать PCI CONFIG_ADDRESS и прочитать CONFIG_DATA.
+;// EDI=адрес mechanism #1, RAX=dword/error.
+pci_read32:
+  push rdi
+  mov edx, edi
+  mov eax, SYS_IO_WRITE32
+  mov edi, PCI_IO_CAP
+  xor esi, esi
+  syscall
+  pop rdi
+  test rax, rax
+  js .done
+  mov eax, SYS_IO_READ32
+  mov edi, PCI_IO_CAP
+  mov esi, 4
+  syscall
+.done:
+  ret
+
+;// EDI=адрес mechanism #1, ESI=value. RAX=0/error.
+pci_write32:
+  push rbx
+  mov ebx, edi
+  mov r10d, esi
+  mov eax, SYS_IO_WRITE32
+  mov edi, PCI_IO_CAP
+  xor esi, esi
+  mov edx, ebx
+  syscall
+  test rax, rax
+  js .done
+  mov eax, SYS_IO_WRITE32
+  mov edi, PCI_IO_CAP
+  mov esi, 4
+  mov edx, r10d
+  syscall
+.done:
+  pop rbx
+  ret
+
+;// Найти class=01h, subclass=08h, prog-if=02h; включить memory/bus master,
+;// опросить размер 64-битного BAR0 и создать MMIO capability.
+;// RAX=handle/error.
+pci_prepare_nvme:
+  push rbx
+  push r12
+  push r13
+  push r14
+  push r15
+  sub rsp, 8
+  xor r12d, r12d                  ;// bus
+.bus:
+  xor r13d, r13d                  ;// device
+.device:
+  xor r14d, r14d                  ;// function
+.function:
+  mov edi, 0x80000000
+  mov eax, r12d
+  shl eax, 16
+  or edi, eax
+  mov eax, r13d
+  shl eax, 11
+  or edi, eax
+  mov eax, r14d
+  shl eax, 8
+  or edi, eax
+  mov r15d, edi                   ;// config base
+  call pci_read32
+  test rax, rax
+  js .error
+  cmp ax, 0xFFFF
+  je .next_function
+  mov edi, r15d
+  or edi, 8
+  call pci_read32
+  test rax, rax
+  js .error
+  mov edx, eax
+  shr edx, 8
+  and edx, 0xFFFFFF
+  cmp edx, 0x010802               ;// class/subclass/programming interface
+  je .found
+.next_function:
+  inc r14d
+  cmp r14d, 8
+  jb .function
+  inc r13d
+  cmp r13d, 32
+  jb .device
+  inc r12d
+  cmp r12d, 256
+  jb .bus
+  mov rax, -2
+  jmp .done
+
+.found:
+  ;// На время size probe запрещаем memory decoding.
+  mov edi, r15d
+  or edi, 4
+  call pci_read32
+  test rax, rax
+  js .error
+  mov [pci_command], eax
+  mov esi, eax
+  and esi, 0xFFFF
+  and esi, not 2
+  mov edi, r15d
+  or edi, 4
+  call pci_write32
+  test rax, rax
+  js .error
+
+  mov edi, r15d
+  or edi, 0x10
+  call pci_read32
+  test rax, rax
+  js .restore_error
+  mov [pci_bar_low], eax
+  mov edx, eax
+  and edx, 7
+  cmp edx, 4                       ;// memory BAR, 64-bit
+  jne .restore_invalid
+  mov edi, r15d
+  or edi, 0x14
+  call pci_read32
+  test rax, rax
+  js .restore_error
+  mov [pci_bar_high], eax
+
+  mov edi, r15d
+  or edi, 0x10
+  mov esi, -1
+  call pci_write32
+  test rax, rax
+  js .restore_error
+  mov edi, r15d
+  or edi, 0x14
+  mov esi, -1
+  call pci_write32
+  test rax, rax
+  js .restore_bar_error
+  mov edi, r15d
+  or edi, 0x10
+  call pci_read32
+  mov [pci_mask_low], eax
+  mov edi, r15d
+  or edi, 0x14
+  call pci_read32
+  mov [pci_mask_high], eax
+
+  ;// Всегда возвращаем BAR до повторного включения device.
+  mov edi, r15d
+  or edi, 0x10
+  mov esi, [pci_bar_low]
+  call pci_write32
+  mov edi, r15d
+  or edi, 0x14
+  mov esi, [pci_bar_high]
+  call pci_write32
+  mov edi, r15d
+  or edi, 4
+  mov esi, [pci_command]
+  and esi, 0xFFFF
+  or esi, 6                       ;// memory space + bus master
+  call pci_write32
+  test rax, rax
+  js .error
+
+  mov r12d, [pci_bar_high]
+  shl r12, 32
+  mov eax, [pci_bar_low]
+  and eax, 0xFFFFFFF0
+  or r12, rax                     ;// physical base
+  mov r13d, [pci_mask_high]
+  shl r13, 32
+  mov eax, [pci_mask_low]
+  and eax, 0xFFFFFFF0
+  or r13, rax
+  not r13
+  inc r13                         ;// BAR bytes
+  test r13, r13
+  jz .invalid
+  add r13, PAGE_SIZE-1
+  jc .invalid
+  shr r13, 12                    ;// pages
+  mov eax, SYS_MMIO_CREATE
+  mov edi, ROOT_CAP
+  mov rsi, r12
+  mov rdx, r13
+  syscall
+  jmp .done
+
+.restore_bar_error:
+  mov edi, r15d
+  or edi, 0x10
+  mov esi, [pci_bar_low]
+  call pci_write32
+.restore_error:
+  mov edi, r15d
+  or edi, 4
+  mov esi, [pci_command]
+  and esi, 0xFFFF
+  call pci_write32
+.error:
+  mov rax, -5
+  jmp .done
+.restore_invalid:
+  mov edi, r15d
+  or edi, 4
+  mov esi, [pci_command]
+  and esi, 0xFFFF
+  call pci_write32
+.invalid:
+  mov rax, -22
+.done:
+  add rsp, 8
+  pop r15
+  pop r14
+  pop r13
+  pop r12
+  pop rbx
+  ret
 ;// Обнулить ECX bytes по RDI.
 zero_bytes:
   xor eax, eax
@@ -684,12 +961,22 @@ keyboard_name db "keyboard.elf"
 .size = $-keyboard_name
 terminal_name db "terminal.elf"
 .size = $-terminal_name
+nvme_name db "nvme.elf"
+.size = $-nvme_name
+vafs_name db "vafs.elf"
+.size = $-vafs_name
 shm_sender_name db "shm_sender.elf"
 .size = $-shm_sender_name
 
 align 8
 bootfs_base dq 0
 bootfs_size dq 0
+nvme_mmio_cap dq 0
+pci_command dd 0
+pci_bar_low dd 0
+pci_bar_high dd 0
+pci_mask_low dd 0
+pci_mask_high dd 0
 load_image dq 0
 load_size dq 0
 load_space dq 0

@@ -22,14 +22,16 @@ Kernel использует встроенный ELF loader ровно один 
 
 ## Initramfs
 
-`scripts/mkinitramfs.py` создаёт детерминированный образ ровно 65536 байт.
+`scripts/mkinitramfs.py` создаёт детерминированный bootstrap-образ ровно
+196608 байт. Это не системная файловая система: исходники и обычные программы
+живут на VaraniaFS.
 Числа little-endian:
 
 ```c
 struct Header {                 /* 24 bytes */
     char magic[8];              /* "VARNIR01" */
     uint32_t version;           /* 1 */
-    uint32_t entry_count;       /* <= 32 */
+    uint32_t entry_count;       /* <= 512 */
     uint32_t total_size;
     uint32_t reserved;
 };
@@ -43,7 +45,7 @@ struct Entry {                  /* 48 bytes */
 };
 ```
 
-Kernel проверяет envelope архива до bootstrap и отображает все 64 KiB procd
+Kernel проверяет envelope архива до bootstrap и отображает все 192 KiB procd
 как R+NX. Procd повторно проверяет точное имя и `offset+size <= total_size`.
 Ни один другой процесс не получает bootfs capability/mapping.
 
@@ -83,14 +85,18 @@ PIE, `PT_INTERP`, relocations, shared libraries и demand paging executable по
 | 4 | IRQ1 | `WAIT` |
 | 5 | ports `0x60..0x64` | `READ` |
 | 6 | VGA MMIO page `0xB8000` | `MAP|READ|WRITE` |
+| 7 | PCI config ports `0xCF8..0xCFF` | `READ|WRITE` |
+| 8 | DMA pool factory | `CREATE` |
 
 Procd передаёт init свой inbox как handle 1 и ослабленный control endpoint как
 handle 2. Каждый последующий процесс также получает собственный endpoint как
 handle 1. Дополнительные grants идут с handle 2 в порядке `ThreadConfig`.
 
-IRQ1 уникален: при создании keyboard driver он перемещается из procd. I/O range
-копируется read-only. VGA capability выдаётся только `terminal.elf`. Ни init,
-ни nameserver, ни shell не владеют hardware capabilities.
+IRQ1 уникален: при создании keyboard driver он перемещается из procd. VGA
+capability выдаётся только `terminal.elf`. Procd сканирует PCI config, создаёт
+capability только на найденный BAR NVMe и передаёт её вместе с отдельным DMA
+allocator процессу `nvme.elf`. Ни init, ни nameserver, ни shell не владеют
+hardware capabilities.
 
 ## Протокол procd
 
@@ -108,15 +114,16 @@ Success reply содержит `words[0]=0`, process capability с `WAIT|CONTROL
 handles. Ошибка возвращается в `words[0]` без capabilities.
 
 Особые grants задаёт bootstrap policy procd, а не запрашивающий процесс:
-keyboard получает nameserver/IRQ/I/O, terminal — nameserver/VGA MMIO, а
-`shm_sender` — `CREATE`. Получатель shared memory
+keyboard получает nameserver/IRQ/I/O, terminal — nameserver/VGA MMIO,
+NVMe — BAR/DMA, VFS — nameserver/`CREATE`, а `shm_sender` — `CREATE`.
+Получатель shared memory
 не получает system capability: sender передаёт ему только ослабленный
 `MAP|READ|WRITE` handle обычным endpoint IPC.
 
 ## Init, nameserver и сервисы
 
 Init сначала запускает nameserver и изолированные integration-процессы. После
-успеха self-tests он создаёт terminal, RAMFS, keyboard driver и shell. Каждому
+успеха self-tests он создаёт terminal, NVMe, VaraniaFS, keyboard driver и shell. Каждому
 из них init передаёт только `CAP_SEND` к endpoint nameserver; hardware grants
 добавляет policy procd.
 
@@ -167,7 +174,7 @@ message db "hello from ring 3", 10
 - `lifecycle_child.elf`: status 37 и сравнение PMM frame count после teardown;
 - `service/client/nameserver`: endpoint queue и capability transfer;
 - `keyboard.elf`: реальный IRQ1, отправляемый тестом через QMP;
-- `terminal/ramfs/shell`: ввод QEMU key events, FS lifecycle и чтение VGA page;
+- `terminal/vafs/nvme/shell`: key events, persistent FS lifecycle и VGA page;
 - `cap_revoke_test.elf`: цепочка из двух descendants и сохранение root;
 - `supervisor.elf`: kill blocked target и два restart завершившегося worker;
 - `shm_sender/receiver.elf`: две общие страницы, capability transfer,

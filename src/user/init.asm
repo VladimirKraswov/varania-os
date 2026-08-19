@@ -167,8 +167,13 @@ start:
   call spawn_interactive
   test rax, rax
   jnz init_failed
-  lea rdi, [ramfs_name]
-  mov esi, ramfs_name.size
+  lea rdi, [nvme_name]
+  mov esi, nvme_name.size
+  call spawn_interactive
+  test rax, rax
+  jnz init_failed
+  lea rdi, [vafs_name]
+  mov esi, vafs_name.size
   call spawn_interactive
   test rax, rax
   jnz init_failed
@@ -376,8 +381,10 @@ keyboard_name db "keyboard.elf"
 .size = $-keyboard_name
 terminal_name db "terminal.elf"
 .size = $-terminal_name
-ramfs_name db "ramfs.elf"
-.size = $-ramfs_name
+nvme_name db "nvme.elf"
+.size = $-nvme_name
+vafs_name db "vafs.elf"
+.size = $-vafs_name
 shell_name db "shell.elf"
 .size = $-shell_name
 lifecycle_name db "lifecycle_child.elf"

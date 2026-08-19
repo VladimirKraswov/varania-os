@@ -1,12 +1,12 @@
 ;//////////////////////////////////////////////////////////////////////////////
-;// Endpoint IPC: сообщения из четырёх слов и до двух capabilities
+;// Endpoint IPC: сообщения из восьми слов и до двух capabilities
 ;//////////////////////////////////////////////////////////////////////////////
 ;
-;// User ABI структуры IpcMessage (80 байт):
-;//   words[4]                      0..31
-;//   capability_count                32
-;//   caps[2] = {handle, rights}    40..71
-;//   sender_token                    72 (только output)
+;// User ABI структуры IpcMessage (112 байт):
+;//   words[8]                       0..63
+;//   capability_count                 64
+;//   caps[2] = {handle, rights}     72..103
+;//   sender_token                     104 (только output)
 ;//
 ;// Передаваемые kernel objects удерживаются очередью сильной ссылкой. Бит
 ;// CAP_MOVE в requested rights просит атомарно закрыть исходный handle после
@@ -16,14 +16,14 @@ IPC_OK          = 0
 IPC_BAD_HANDLE  = -9
 IPC_WOULD_BLOCK = -11
 
-IpcMessage.words       = 0
-IpcMessage.cap_count   = 32
-IpcMessage.caps        = 40
-IpcMessage.sender      = 72
-IpcMessage.bytes       = 80
 IpcCap.handle          = 0
 IpcCap.rights          = 8
 IpcCap.bytes           = 16
+IpcMessage.words       = 0
+IpcMessage.cap_count   = IPC_WORD_COUNT*8
+IpcMessage.caps        = IpcMessage.cap_count+8
+IpcMessage.sender      = IpcMessage.caps+IPC_CAP_COUNT*IpcCap.bytes
+IpcMessage.bytes       = IpcMessage.sender+8
 
 ;// Доставить head-сообщение указанной задаче.
 ;// RDI=Endpoint, RSI=receiver TCB, RDX=user IpcMessage*. RAX=IPC_*.
@@ -33,7 +33,7 @@ function ipc_endpoint_deliver
   push r13
   push r14
   push r15
-  sub rsp, 88
+  sub rsp, IpcMessage.bytes+8
   mov rbx, rdi
   mov r12, rsi
   mov r15, rdx
@@ -71,7 +71,7 @@ function ipc_endpoint_deliver
   mov rax, [rbx+Endpoint.sender+r13*8]
   mov [rsp+IpcMessage.sender], rax
   mov rax, r13
-  shl rax, 2
+  shl rax, 3
   xor ecx, ecx
   .word:
     mov rdx, [rbx+Endpoint.words+rax*8]
@@ -184,11 +184,11 @@ function ipc_endpoint_deliver
   ;// Этот путь практически недостижим после предварительной validation, но
   ;// rollback сохраняет инвариант при будущей многопоточности address space.
   .fault_after_caps:
-  mov qword [rsp+80], -14
+  mov qword [rsp+IpcMessage.bytes], -14
   mov r15, r14
   jmp .rollback
   .insert_failed:
-  mov qword [rsp+80], -12
+  mov qword [rsp+IpcMessage.bytes], -12
   .rollback:
     test r15, r15
     jz .rollback_done
@@ -203,7 +203,7 @@ function ipc_endpoint_deliver
     call capability_clear_slot
     jmp .rollback
   .rollback_done:
-  mov rax, [rsp+80]
+  mov rax, [rsp+IpcMessage.bytes]
   jmp .done
   .fault:
   mov rax, -14
@@ -211,7 +211,7 @@ function ipc_endpoint_deliver
   .would_block:
   mov rax, IPC_WOULD_BLOCK
   .done:
-  add rsp, 88
+  add rsp, IpcMessage.bytes+8
   pop r15
   pop r14
   pop r13
@@ -273,7 +273,8 @@ function ipc_endpoint_send
   push r13
   push r14
   push r15
-  sub rsp, 184
+  ;// IpcMessage, затем шесть массивов по IPC_CAP_COUNT qword и padding.
+  sub rsp, IpcMessage.bytes+6*IPC_CAP_COUNT*8+8
   mov r12, rdi
   mov r13, rsi
   mov esi, CAP_ENDPOINT
@@ -308,7 +309,7 @@ function ipc_endpoint_send
     shl rax, 4
     mov rdi, [rsp+IpcMessage.caps+rax+IpcCap.handle]
     mov r12, [rsp+IpcMessage.caps+rax+IpcCap.rights]
-    mov qword [rsp+128+r13*8], -1 ;// source slot, если MOVE не задан
+    mov qword [rsp+IpcMessage.bytes+3*IPC_CAP_COUNT*8+r13*8], -1 ;// source slot, если MOVE не задан
     bt r12, 63
     jnc .without_move
     btr r12, 63
@@ -322,21 +323,21 @@ function ipc_endpoint_send
     and r9, r12
     cmp r9, r12
     jne .bad_handle
-    mov [rsp+80+r13*8], rax       ;// target
-    mov [rsp+96+r13*8], rdx       ;// type
-    mov [rsp+112+r13*8], r12      ;// weakened rights
+    mov [rsp+IpcMessage.bytes+0*IPC_CAP_COUNT*8+r13*8], rax ;// target
+    mov [rsp+IpcMessage.bytes+1*IPC_CAP_COUNT*8+r13*8], rdx ;// type
+    mov [rsp+IpcMessage.bytes+2*IPC_CAP_COUNT*8+r13*8], r12 ;// weakened rights
     mov r10, r8
     mov edi, [current_task]
     call task_by_index
     mov rax, [rax+Task.cap_node+r10*8]
     test rax, rax
     jz .bad_handle
-    mov [rsp+144+r13*8], rax      ;// lineage source
+    mov [rsp+IpcMessage.bytes+4*IPC_CAP_COUNT*8+r13*8], rax ;// lineage source
     mov rax, r13
     shl rax, 4
     bt qword [rsp+IpcMessage.caps+rax+IpcCap.rights], 63
     jnc .next_cap
-    mov [rsp+128+r13*8], r8
+    mov [rsp+IpcMessage.bytes+3*IPC_CAP_COUNT*8+r13*8], r8
     .next_cap:
     inc r13
     jmp .validate_cap
@@ -361,13 +362,13 @@ function ipc_endpoint_send
   .lineage_node:
     cmp r13, r15
     jae .lineage_ready
-    mov rdi, [rsp+144+r13*8]
+    mov rdi, [rsp+IpcMessage.bytes+4*IPC_CAP_COUNT*8+r13*8]
     xor esi, esi
     mov rdx, -1
     call cap_node_create
     test rax, rax
     jz .lineage_failed
-    mov [rsp+160+r13*8], rax
+    mov [rsp+IpcMessage.bytes+5*IPC_CAP_COUNT*8+r13*8], rax
     mov qword [rax+CapNode.pinned], 1
     inc r13
     jmp .lineage_node
@@ -375,7 +376,7 @@ function ipc_endpoint_send
     test r13, r13
     jz .no_memory
     dec r13
-    mov rdi, [rsp+160+r13*8]
+    mov rdi, [rsp+IpcMessage.bytes+5*IPC_CAP_COUNT*8+r13*8]
     mov qword [rdi+CapNode.pinned], 0
     call cap_node_prune
     jmp .lineage_failed
@@ -386,7 +387,7 @@ function ipc_endpoint_send
   mov rax, [rax+Task.token]
   mov [rbx+Endpoint.sender+r12*8], rax
   mov rax, r12
-  shl rax, 2
+  shl rax, 3
   xor ecx, ecx
   .copy_word:
     mov rdx, [rsp+IpcMessage.words+rcx*8]
@@ -404,16 +405,16 @@ function ipc_endpoint_send
     mov rax, r12
     shl rax, 1
     add rax, r13
-    mov rdx, [rsp+80+r13*8]
-    mov rcx, [rsp+96+r13*8]
+    mov rdx, [rsp+IpcMessage.bytes+0*IPC_CAP_COUNT*8+r13*8]
+    mov rcx, [rsp+IpcMessage.bytes+1*IPC_CAP_COUNT*8+r13*8]
     mov [rbx+Endpoint.cap_target+rax*8], rdx
     mov [rbx+Endpoint.cap_type+rax*8], rcx
-    mov rdx, [rsp+112+r13*8]
+    mov rdx, [rsp+IpcMessage.bytes+2*IPC_CAP_COUNT*8+r13*8]
     mov [rbx+Endpoint.cap_rights+rax*8], rdx
-    mov rdx, [rsp+160+r13*8]
+    mov rdx, [rsp+IpcMessage.bytes+5*IPC_CAP_COUNT*8+r13*8]
     mov [rbx+Endpoint.cap_node+rax*8], rdx
     mov rdi, rcx
-    mov rsi, [rsp+80+r13*8]
+    mov rsi, [rsp+IpcMessage.bytes+0*IPC_CAP_COUNT*8+r13*8]
     call object_retain            ;// queue ownership
     inc r13
     jmp .queue_cap
@@ -430,7 +431,7 @@ function ipc_endpoint_send
   .move_cap:
     cmp r13, r15
     jae .wake
-    mov rsi, [rsp+128+r13*8]
+    mov rsi, [rsp+IpcMessage.bytes+3*IPC_CAP_COUNT*8+r13*8]
     cmp rsi, -1
     je .next_move
     mov edi, [current_task]
@@ -461,7 +462,7 @@ function ipc_endpoint_send
   .invalid:
   mov rax, -22
   .done:
-  add rsp, 184
+  add rsp, IpcMessage.bytes+6*IPC_CAP_COUNT*8+8
   pop r15
   pop r14
   pop r13

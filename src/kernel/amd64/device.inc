@@ -114,6 +114,69 @@ function device_io_write8
   pop rbx
 endf
 
+;// 32-битные операции нужны PCI configuration mechanism #1 (0xCF8/0xCFC).
+;// Проверка диапазона учитывает все четыре байта, а не только первый.
+;// RDI=handle, RSI=offset. RAX=dword или IPC_BAD_HANDLE.
+function device_io_read32
+  push rbx
+  sub rsp, 8
+  mov rbx, rsi
+  mov esi, CAP_IO_PORT
+  mov edx, CAP_READ
+  call capability_lookup
+  test rax, rax
+  jz .denied
+  mov r8, rax
+  mov rdx, rax
+  shr rdx, 32
+  mov rax, rbx
+  add rax, 4
+  jc .denied
+  cmp rax, rdx
+  ja .denied
+  movzx edx, r8w
+  add rdx, rbx
+  in eax, dx
+  jmp .done
+  .denied:
+  mov rax, IPC_BAD_HANDLE
+  .done:
+  add rsp, 8
+  pop rbx
+endf
+
+;// RDI=handle, RSI=offset, RDX=value. RAX=0 или IPC_BAD_HANDLE.
+function device_io_write32
+  push rbx
+  push r12
+  mov rbx, rsi
+  mov r12d, edx
+  mov esi, CAP_IO_PORT
+  mov edx, CAP_WRITE
+  call capability_lookup
+  test rax, rax
+  jz .denied
+  mov r8, rax
+  mov rdx, rax
+  shr rdx, 32
+  mov rax, rbx
+  add rax, 4
+  jc .denied
+  cmp rax, rdx
+  ja .denied
+  movzx edx, r8w
+  add rdx, rbx
+  mov eax, r12d
+  out dx, eax
+  xor eax, eax
+  jmp .done
+  .denied:
+  mov rax, IPC_BAD_HANDLE
+  .done:
+  pop r12
+  pop rbx
+endf
+
 ;// RDI=IRQ. Вызывается interrupt stub-ом и никогда не разыменовывает user-адрес.
 function device_irq_notify
   push rbx

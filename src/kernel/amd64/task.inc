@@ -84,7 +84,10 @@ USER.bootfsBase     = 0x0000000080000000
 USER.stackTop       = 0x00007FFFFFF00000
 USER.stackMaxPages  = 16
 USER.stackLimit     = USER.stackTop-USER.stackMaxPages*PAGE_SIZE
-USER.heapMaxPages   = 256
+;// Современная учебная система не притворяется машиной с 4 MiB RAM.
+;// 16 MiB виртуального heap на процесс достаточно FASM и metadata VFS;
+;// физические frames появляются только по фактическому brk(), а не заранее.
+USER.heapMaxPages   = 4096
 USER.limit          = 0x0000800000000000
 
 align 16
@@ -1473,10 +1476,29 @@ function task_create_init
   ;// получает не физический адрес, а ослабляемую capability на одну страницу.
   mov rdi, r15
   mov esi, CAP_MMIO
-  mov edx, 0x000B8000
+  mov rdx, (1 shl 48)+0x000B8000 ;// pages:16 | physical:48
   mov ecx, CAP_MAP+CAP_READ+CAP_WRITE
   call capability_insert_task
   cmp eax, 6
+  jne .failed
+  ;// Procd выполняет минимальную bootstrap-роль device manager: находит
+  ;// PCI function и заключает её BAR в MMIO capability. Сам NVMe driver этих
+  ;// конфигурационных портов не получает.
+  mov edi, r12d
+  mov esi, 0x0CF8
+  mov edx, 8
+  mov ecx, CAP_READ+CAP_WRITE
+  call capability_grant_io
+  cmp eax, 7
+  jne .failed
+  ;// DMA pool отделён от CAP_SYSTEM: драйвер может получать непрерывные
+  ;// буферы, но не может создавать address spaces, threads или arbitrary MMIO.
+  mov rdi, r15
+  mov esi, CAP_DMA_POOL
+  mov edx, 1
+  mov ecx, CAP_CREATE
+  call capability_insert_task
+  cmp eax, 8
   jne .failed
   mov eax, 1
   jmp .done

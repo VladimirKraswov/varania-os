@@ -11,7 +11,7 @@ VGA_BASE      = 0x50000000
 VGA_WIDTH     = 80
 VGA_HEIGHT    = 25
 VGA_ATTRIBUTE = 0x07
-LINE_MAX      = 15
+LINE_MAX      = 47               ;// весь payload IPC words[2..7]
 
 segment readable executable
 start:
@@ -154,7 +154,7 @@ line_key:
   mov qword [pending_reply], 0
   mov qword [line_length], 0
   lea rdi, [line_buffer]
-  mov ecx, 16
+  mov ecx, LINE_MAX+1
   xor eax, eax
   rep stosb
 .done:
@@ -271,7 +271,7 @@ close_handle:
 
 segment readable writeable
 welcome_text db "Welcome to Varania OS", 10
-             db "User-space VGA terminal and RAMFS are ready.", 10
+             db "User-space terminal, NVMe and VaraniaFS are ready.", 10
              db "Type 'help' for available commands.", 10, 10
 .size = $-welcome_text
 ready_text db "terminal: user-space VGA console ready", 10

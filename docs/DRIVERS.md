@@ -83,14 +83,22 @@ Supervisor может завершить зависший драйвер по ca
 
 ## PCI, MMIO и DMA
 
-Текущий MMIO тип ограничен одной заранее известной page и подходит для VGA.
-Для PCI устройств нужны дополнительные объекты и policy:
+Рабочий NVMe path уже использует следующие механизмы:
 
-- read-only PCI configuration capability;
-- MMIO range с длиной, cache attributes и отображением только driver-у;
-- DMA buffers и IOMMU domain;
-- MSI/MSI-X interrupt objects;
-- revoke/unmap при завершении или рестарте драйвера.
+- procd сканирует PCI mechanism #1 через capability портов `CF8/CFC`;
+- class/subclass/prog-if `01/08/02` выбирает NVMe function;
+- 64-битный BAR probe выполняется при выключенном Memory Space decode;
+- `MMIO_CREATE` заключает base+pages в capability, `MMIO_MAP` отображает весь BAR;
+- `DMA_CREATE` возвращает contiguous SharedMemory и physical base;
+- ring-3 драйвер создаёт Admin/I/O SQ/CQ и публикует block endpoint.
+
+Следующие аппаратные механизмы ещё нужны:
+
+- ECAM из ACPI MCFG вместо legacy PCI mechanism #1;
+- cache attributes для MMIO mappings;
+- MSI/MSI-X interrupt objects вместо polling completion;
+- IOMMU domain и revoke/unmap при завершении драйвера;
+- device manager вместо временной bootstrap policy в procd.
 
 До появления IOMMU driver устройства с bus-master DMA не полностью изолирован:
 само устройство способно записывать физическую память вне CPU page tables. Это

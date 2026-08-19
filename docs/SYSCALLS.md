@@ -43,10 +43,14 @@
 | 22 | `CAP_CLOSE` | `handle` | закрывает локальную ссылку |
 | 23 | `BOOTFS_INFO` | `bootfs_cap` | `RAX=base`, `RDX=used size` |
 | 24 | `PROCESS_KILL` | `process_cap`, `status` | внешний exit; нужен `CONTROL` |
-| 25 | `SHARED_CREATE` | `system_cap`, `pages` | shared handle, `pages=1..16` |
+| 25 | `SHARED_CREATE` | `system_cap`, `pages` | shared handle, `pages=1..64` |
 | 26 | `SHARED_MAP` | `shared_cap`, `virtual`, `flags` | map в текущий space |
 | 27 | `CAP_REVOKE` | `handle` | число закрытых active descendants |
-| 28 | `MMIO_MAP` | `mmio_cap`, `virtual` | одна device page как RW+NX |
+| 28 | `MMIO_MAP` | `mmio_cap`, `virtual` | весь capability range как RW+NX |
+| 29 | `IO_READ32` | `io_cap`, `offset` | dword; PCI config backend |
+| 30 | `IO_WRITE32` | `io_cap`, `offset`, `value` | 0 |
+| 31 | `MMIO_CREATE` | `system_cap`, `physical`, `pages` | MMIO capability |
+| 32 | `DMA_CREATE` | `dma_pool_cap`, `pages` | contiguous shared cap, physical в `RDX` |
 
 Основные errno: `-2` no entry, `-9` bad capability, `-11` queue/full slots,
 `-12` no memory, `-14` bad user pointer, `-16` busy, `-22` invalid argument,
@@ -60,8 +64,8 @@ struct IpcCap {
     uint64_t rights;
 };
 
-struct IpcMessage {             /* 80 bytes */
-    uint64_t words[4];
+struct IpcMessage {             /* 112 bytes */
+    uint64_t words[8];
     uint64_t capability_count;  /* 0..2 */
     struct IpcCap caps[2];
     uint64_t sender_token;      /* output only, не capability */
@@ -108,7 +112,7 @@ SPACE_MAP_EXEC  = 2
 leaf frames и все уровни page tables снизу вверх. Дублированный frame нельзя
 map-ить (`-16`), потому что его ownership был бы неоднозначен.
 
-`SHARED_CREATE` создаёт от 1 до 16 zero-filled frames и возвращает capability с
+`SHARED_CREATE` создаёт от 1 до 64 zero-filled frames и возвращает capability с
 `MAP|READ|WRITE`. `SHARED_MAP` отображает весь объект в текущий managed
 AddressSpace по page-aligned адресу. Разрешены флаги `0` и `SPACE_MAP_WRITE`;
 исполняемое отображение невозможно. Для RW нужны `MAP|READ|WRITE`, для R —
@@ -121,7 +125,14 @@ AddressSpace по page-aligned адресу. Разрешены флаги `0` �
 и не передаётся user process аргументом. Сейчас bootstrap policy создаёт одну
 capability — VGA text page `0xB8000` для `terminal.elf`. Mapping получает
 `USER|RW|NX|BORROWED`: teardown удаляет page tables, но не пытается вернуть
-device page в PMM. Повторное отображение в занятый virtual address даёт `-16`.
+device pages в PMM. Повторное отображение занятого диапазона даёт `-16`.
+
+`MMIO_CREATE` доступен только обладателю system capability с `CREATE`. Физический
+адрес и длина проверяются и затем становятся частью value capability; обычный
+драйвер получает уже готовый диапазон. `DMA_CREATE` требует отдельный
+`CAP_DMA_POOL`, выделяет физически непрерывные frames и возвращает и shared
+object, и physical base. Именно так `procd` ограничивает NVMe-драйвер BAR-ом и
+DMA allocator, не передавая ему root capability.
 
 ## Создание thread
 
